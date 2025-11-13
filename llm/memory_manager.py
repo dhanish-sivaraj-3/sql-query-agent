@@ -123,6 +123,137 @@ class MemoryManager:
             'columns': learned_columns,
             'common_filters': common_filters
         }
+
+    def get_formatted_conversation_history(self, session_id: str, database: str, max_messages: int = 10) -> Dict:
+    """Get formatted conversation history for frontend display"""
+    history = self.get_conversation_history(session_id, database, max_messages)
+    
+    formatted_history = []
+    total_queries = 0
+    total_rows = 0
+    
+    for i, message in enumerate(history):
+        if message['role'] == 'user':
+            # This is a user query
+            history_item = {
+                'type': 'query',
+                'timestamp': message['timestamp'],
+                'content': message['content'],
+                'sql_query': None,
+                'results': None,
+                'message_id': i
+            }
+            
+            # Look ahead for assistant response
+            if i + 1 < len(history) and history[i + 1]['role'] == 'assistant':
+                assistant_msg = history[i + 1]
+                history_item['sql_query'] = assistant_msg.get('sql_query')
+                if assistant_msg.get('results_summary'):
+                    results = assistant_msg['results_summary']
+                    history_item['results'] = {
+                        'row_count': results.get('row_count', 0),
+                        'columns': results.get('columns', []),
+                        'execution_time': results.get('execution_time', 0)
+                    }
+                    total_queries += 1
+                    total_rows += results.get('row_count', 0)
+            
+            formatted_history.append(history_item)
+    
+    return {
+        'conversations': formatted_history,
+        'stats': {
+            'total_queries': total_queries,
+            'total_rows_processed': total_rows,
+            'session_duration': self._calculate_session_duration(history)
+        }
+    }
+
+def _calculate_session_duration(self, history: List[Dict]) -> str:
+    """Calculate session duration from first to last message"""
+    if not history:
+        return "0 minutes"
+    
+    try:
+        first_time = datetime.fromisoformat(history[0]['timestamp'])
+        last_time = datetime.fromisoformat(history[-1]['timestamp'])
+        duration = last_time - first_time
+        minutes = duration.total_seconds() / 60
+        
+        if minutes < 1:
+            return "Less than 1 minute"
+        elif minutes < 60:
+            return f"{int(minutes)} minutes"
+        else:
+            hours = minutes / 60
+            return f"{hours:.1f} hours"
+    except:
+        return "Unknown duration"
+
+def get_conversation_insights(self, session_id: str, database: str) -> Dict:
+    """Get insights about the conversation patterns"""
+    history = self.get_conversation_history(session_id, database)
+    
+    # Analyze query patterns
+    table_usage = {}
+    common_filters = {}
+    query_types = {
+        'SELECT': 0,
+        'COUNT': 0,
+        'AGGREGATE': 0,
+        'FILTER': 0
+    }
+    
+    for message in history:
+        if message.get('sql_query'):
+            sql = message['sql_query'].upper()
+            
+            # Count query types
+            if 'COUNT(' in sql:
+                query_types['COUNT'] += 1
+            if any(agg in sql for agg in ['SUM(', 'AVG(', 'MAX(', 'MIN(']):
+                query_types['AGGREGATE'] += 1
+            if 'WHERE' in sql:
+                query_types['FILTER'] += 1
+            query_types['SELECT'] += 1
+            
+            # Extract table usage
+            if 'FROM' in sql:
+                table_part = sql.split('FROM')[1].split()[0].strip('`')
+                table_usage[table_part] = table_usage.get(table_part, 0) + 1
+    
+    return {
+        'query_patterns': query_types,
+        'table_usage': table_usage,
+        'total_interactions': len([m for m in history if m['role'] == 'user']),
+        'most_active_period': self._get_most_active_period(history)
+    }
+
+def _get_most_active_period(self, history: List[Dict]) -> str:
+    """Determine the most active period in the conversation"""
+    if not history:
+        return "No activity"
+    
+    try:
+        hours = []
+        for message in history:
+            dt = datetime.fromisoformat(message['timestamp'])
+            hours.append(dt.hour)
+        
+        if hours:
+            avg_hour = sum(hours) / len(hours)
+            if 5 <= avg_hour < 12:
+                return "Morning"
+            elif 12 <= avg_hour < 17:
+                return "Afternoon"
+            elif 17 <= avg_hour < 22:
+                return "Evening"
+            else:
+                return "Night"
+    except:
+        pass
+    
+    return "Various times"
     
     def _cleanup_old_conversations(self):
         """Remove old conversations to manage memory"""
