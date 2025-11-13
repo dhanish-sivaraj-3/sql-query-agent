@@ -2,6 +2,7 @@ import google.generativeai as genai
 import logging
 import os
 from config.settings import config
+from llm.memory_manager import memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +119,9 @@ Common Query Examples for ecommerce:
             self.schema_cache.clear()
             logger.info("Cleared all schema cache")
     
-    def generate_sql_query(self, natural_language_query, db_connector, database=None, conversation_history=None):
+    def generate_sql_query(self, natural_language_query, db_connector, database=None, conversation_history=None, session_id=None):
         """
-        Generate SQL query from natural language using Gemini
+        Generate SQL query from natural language using Gemini with memory
         """
         if not self.is_initialized():
             return {
@@ -129,17 +130,23 @@ Common Query Examples for ecommerce:
             }
             
         try:
-            # Use the provided db_connector (which could be custom) instead of creating a new one
             schema_context = self.get_schema_context(db_connector, database)
+            
+            # Get conversation context from memory
+            memory_context = ""
+            if session_id and database:
+                memory_context = memory_manager.get_conversation_summary(session_id, database)
             
             # Determine database type for SQL syntax
             db_type = getattr(db_connector, 'db_type', 'mysql')
             
             system_prompt = f"""
             You are a SQL expert. Generate SQL queries using ONLY the tables and columns that exist in the actual database schema.
-
+    
             {schema_context}
-
+    
+            {memory_context}
+    
             CRITICAL RULES:
             1. Use ONLY the table names and column names shown in the schema above
             2. Do NOT invent or assume table or column names that are not listed
@@ -150,9 +157,10 @@ Common Query Examples for ecommerce:
             7. For SQL Server, use TOP instead of LIMIT
             8. Use proper SQL syntax based on the database type
             9. Current database type: {db_type.upper()}
-
+            10. Consider the previous conversation context when generating SQL
+    
             Natural Language Request: "{natural_language_query}"
-
+    
             SQL Query:
             """
             
