@@ -180,10 +180,10 @@ HTML_TEMPLATE = '''
         <!-- Results Section -->
         <div id="results" class="hidden"></div>
 
-        <!-- Enhanced Memory Information -->
+        <!-- Simplified Memory Information -->
         <div id="memorySection" class="bg-purple-50 rounded-2xl p-6 mt-8 hidden">
             <h3 class="text-xl font-semibold text-purple-800 mb-4">
-                <i class="fas fa-brain mr-2"></i>Memory & Analytics
+                <i class="fas fa-brain mr-2"></i>Memory & Context
             </h3>
             <div id="memoryInfo" class="text-purple-700">
                 <p>No memory context available yet. Start asking questions to build conversation memory.</p>
@@ -347,8 +347,8 @@ HTML_TEMPLATE = '''
             // Load database info
             await loadDatabaseInfo(database, isCustom);
             
-            // Load enhanced memory context
-            await loadEnhancedMemoryContext();
+            // Load memory context
+            await loadMemoryContext();
             
             // Scroll to query form
             document.getElementById('queryFormSection').scrollIntoView({ behavior: 'smooth' });
@@ -509,171 +509,71 @@ HTML_TEMPLATE = '''
             }
         }
         
-        // Enhanced memory context loading
-        async function loadEnhancedMemoryContext() {
+        // Simplified memory context loading
+        async function loadMemoryContext() {
             if (!currentDatabase) return;
             
             try {
-                const [summaryResponse, historyResponse] = await Promise.all([
-                    fetch('/api/memory/enhanced-summary', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ session_id: sessionId, database: currentDatabase })
-                    }),
-                    fetch('/api/memory/formatted-history', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ session_id: sessionId, database: currentDatabase })
+                const response = await fetch('/api/memory/summary', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        database: currentDatabase
                     })
-                ]);
-
-                const summaryData = await summaryResponse.json();
-                const historyData = await historyResponse.json();
+                });
                 
+                const data = await response.json();
                 const memorySection = document.getElementById('memorySection');
                 const memoryInfo = document.getElementById('memoryInfo');
                 const memoryStatus = document.getElementById('memoryStatus');
                 
-                if (summaryData.success && historyData.success) {
+                if (data.success) {
                     memorySection.classList.remove('hidden');
                     
                     let memoryHTML = `
                         <div class="space-y-4">
-                            <!-- Memory Stats -->
-                            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                                <div class="bg-white rounded-lg p-3 border border-purple-200 text-center">
-                                    <div class="text-2xl font-bold text-purple-600">${historyData.stats.total_queries}</div>
-                                    <div class="text-xs text-purple-500">Total Queries</div>
-                                </div>
-                                <div class="bg-white rounded-lg p-3 border border-purple-200 text-center">
-                                    <div class="text-2xl font-bold text-purple-600">${historyData.stats.total_rows_processed}</div>
-                                    <div class="text-xs text-purple-500">Rows Processed</div>
-                                </div>
-                                <div class="bg-white rounded-lg p-3 border border-purple-200 text-center">
-                                    <div class="text-lg font-bold text-purple-600">${historyData.insights.most_active_period}</div>
-                                    <div class="text-xs text-purple-500">Active Period</div>
-                                </div>
-                                <div class="bg-white rounded-lg p-3 border border-purple-200 text-center">
-                                    <div class="text-lg font-bold text-purple-600">${historyData.stats.session_duration}</div>
-                                    <div class="text-xs text-purple-500">Session Duration</div>
-                                </div>
-                            </div>
-
-                            <!-- Query Patterns -->
+                            <!-- Simple Memory Stats -->
                             <div class="bg-white rounded-lg p-4 border border-purple-200">
-                                <h4 class="font-semibold text-purple-800 mb-3 flex items-center">
-                                    <i class="fas fa-chart-pie mr-2"></i>Query Patterns
-                                </h4>
-                                <div class="flex flex-wrap gap-2">
-                                    ${Object.entries(historyData.insights.query_patterns)
-                                        .filter(([_, count]) => count > 0)
-                                        .map(([type, count]) => `
-                                            <span class="px-2 py-1 bg-purple-100 text-purple-800 rounded-full text-xs">
-                                                ${type}: ${count}
-                                            </span>
-                                        `).join('')}
+                                <div class="flex items-center justify-between mb-2">
+                                    <span class="font-semibold text-purple-800">Conversation Context</span>
+                                    <span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">
+                                        ${data.total_conversations} conversation${data.total_conversations !== 1 ? 's' : ''}
+                                    </span>
                                 </div>
+                                <p class="text-purple-700 text-sm">${data.summary}</p>
                             </div>
-
-                            <!-- Recent Conversations -->
-                            <div class="bg-white rounded-lg p-4 border border-purple-200">
-                                <div class="flex justify-between items-center mb-3">
-                                    <h4 class="font-semibold text-purple-800 flex items-center">
-                                        <i class="fas fa-history mr-2"></i>Recent Conversations
-                                    </h4>
-                                    <button onclick="exportMemory()" class="px-3 py-1 bg-purple-500 text-white rounded-lg text-sm hover:bg-purple-600">
-                                        <i class="fas fa-download mr-1"></i>Export
-                                    </button>
-                                </div>
-                                <div class="space-y-3 max-h-60 overflow-y-auto">
-                                    ${historyData.history.length > 0 ? 
-                                        historyData.history.map(conv => `
-                                            <div class="border border-gray-200 rounded-lg p-3 hover:bg-purple-50 transition-colors">
-                                                <div class="flex justify-between items-start mb-2">
-                                                    <span class="text-xs text-gray-500">${formatTime(conv.timestamp)}</span>
-                                                    ${conv.results ? 
-                                                        `<span class="px-2 py-1 bg-green-100 text-green-800 rounded text-xs">${conv.results.row_count} rows</span>` 
-                                                        : '<span class="px-2 py-1 bg-gray-100 text-gray-800 rounded text-xs">Pending</span>'
-                                                    }
-                                                </div>
-                                                <p class="text-sm font-medium text-gray-800 mb-2">${conv.content}</p>
-                                                ${conv.sql_query ? `
-                                                    <details class="text-xs">
-                                                        <summary class="cursor-pointer text-purple-600 hover:text-purple-800">View SQL</summary>
-                                                        <pre class="mt-2 p-2 bg-gray-800 text-green-400 rounded overflow-x-auto text-sm">${conv.sql_query}</pre>
-                                                    </details>
-                                                ` : ''}
-                                            </div>
-                                        `).join('') 
-                                        : '<p class="text-gray-500 text-center py-4">No conversation history yet</p>'
-                                    }
-                                </div>
-                            </div>
-
-                            <!-- Learned Schema -->
-                            ${summaryData.learned_schema.tables.length > 0 ? `
-                                <div class="bg-white rounded-lg p-4 border border-purple-200">
-                                    <h4 class="font-semibold text-purple-800 mb-2 flex items-center">
-                                        <i class="fas fa-brain mr-2"></i>Learned Schema
-                                    </h4>
-                                    <div class="flex flex-wrap gap-1">
-                                        ${summaryData.learned_schema.tables.map(table => 
-                                            `<span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">${table}</span>`
-                                        ).join('')}
-                                    </div>
-                                </div>
-                            ` : ''}
-                        </div>
                     `;
                     
+                    // Add learned schema if available
+                    if (data.learned_schema && data.learned_schema.tables && data.learned_schema.tables.length > 0) {
+                        memoryHTML += `
+                            <div class="bg-white rounded-lg p-4 border border-purple-200">
+                                <h4 class="font-semibold text-purple-800 mb-2 flex items-center">
+                                    <i class="fas fa-brain mr-2"></i>Learned Schema
+                                </h4>
+                                <div class="flex flex-wrap gap-1">
+                                    ${data.learned_schema.tables.map(table => 
+                                        `<span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">${table}</span>`
+                                    ).join('')}
+                                </div>
+                            </div>
+                        `;
+                    }
+                    
+                    memoryHTML += `</div>`;
                     memoryInfo.innerHTML = memoryHTML;
                     
                     // Update memory status
                     memoryStatus.classList.remove('hidden');
-                    memoryStatus.innerHTML = `<i class="fas fa-brain mr-1"></i>Memory: ${historyData.stats.total_queries} queries`;
+                    memoryStatus.innerHTML = '<i class="fas fa-brain mr-1"></i>Memory: Active';
                     memoryStatus.className = 'px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm';
                 }
             } catch (error) {
-                console.error('Error loading enhanced memory context:', error);
+                console.error('Error loading memory context:', error);
             }
-        }
-        
-        // Export memory function
-        async function exportMemory() {
-            if (!currentDatabase) return;
-            
-            try {
-                const response = await fetch('/api/memory/export', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ session_id: sessionId, database: currentDatabase })
-                });
-                
-                const data = await response.json();
-                if (data.success) {
-                    // Create and download JSON file
-                    const blob = new Blob([JSON.stringify(data.export_data, null, 2)], { type: 'application/json' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = data.filename;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                    
-                    alert('Memory exported successfully!');
-                }
-            } catch (error) {
-                console.error('Error exporting memory:', error);
-                alert('Error exporting memory: ' + error.message);
-            }
-        }
-        
-        // Format time for display
-        function formatTime(timestamp) {
-            const date = new Date(timestamp);
-            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         }
         
         // Clear memory
@@ -700,7 +600,7 @@ HTML_TEMPLATE = '''
                     console.log('Memory cleared:', data.message);
                     alert('Memory cleared successfully!');
                     // Reload memory context
-                    await loadEnhancedMemoryContext();
+                    await loadMemoryContext();
                 }
             } catch (error) {
                 console.error('Error clearing memory:', error);
@@ -896,7 +796,7 @@ HTML_TEMPLATE = '''
                     displaySuccessResults(data);
                     addToHistory(query, data, database);
                     // Update memory context after successful query
-                    await loadEnhancedMemoryContext();
+                    await loadMemoryContext();
                 } else {
                     displayError(data.error);
                 }
@@ -1081,6 +981,8 @@ HTML_TEMPLATE = '''
 </body>
 </html>
 '''
+
+# ... (keep all your existing API endpoints exactly as they were before, without the enhanced memory endpoints)
 
 @app.route('/')
 def home():
@@ -1565,219 +1467,6 @@ def get_memory_summary():
         })
     except Exception as e:
         logger.error(f"Error getting memory summary: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-# New enhanced memory endpoints
-@app.route('/api/memory/enhanced-summary', methods=['POST'])
-def get_enhanced_memory_summary():
-    """Get enhanced memory summary with analytics"""
-    try:
-        data = request.get_json()
-        session_id = data.get('session_id', 'default')
-        database = data.get('database')
-        
-        if not database:
-            return jsonify({"success": False, "error": "Database is required"}), 400
-        
-        # Get basic summary
-        summary = memory_manager.get_conversation_summary(session_id, database)
-        learned_schema = memory_manager.get_schema_learning(session_id, database)
-        
-        # Get conversation insights
-        history = memory_manager.get_conversation_history(session_id, database)
-        
-        # Calculate additional metrics
-        total_queries = len([m for m in history if m['role'] == 'user'])
-        total_rows = sum([m.get('results_summary', {}).get('row_count', 0) for m in history if m.get('results_summary')])
-        
-        # Analyze query patterns
-        query_types = {
-            'SELECT': 0,
-            'COUNT': 0,
-            'AGGREGATE': 0,
-            'FILTER': 0
-        }
-        
-        for message in history:
-            if message.get('sql_query'):
-                sql = message['sql_query'].upper()
-                if 'COUNT(' in sql:
-                    query_types['COUNT'] += 1
-                if any(agg in sql for agg in ['SUM(', 'AVG(', 'MAX(', 'MIN(']):
-                    query_types['AGGREGATE'] += 1
-                if 'WHERE' in sql:
-                    query_types['FILTER'] += 1
-                query_types['SELECT'] += 1
-        
-        return jsonify({
-            "success": True,
-            "summary": summary,
-            "learned_schema": learned_schema,
-            "analytics": {
-                "total_queries": total_queries,
-                "total_rows_processed": total_rows,
-                "query_patterns": query_types,
-                "session_duration": "Active session"  # This would need more sophisticated tracking
-            }
-        })
-    except Exception as e:
-        logger.error(f"Error getting enhanced memory summary: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route('/api/memory/formatted-history', methods=['POST'])
-def get_formatted_memory_history():
-    """Get formatted conversation history for better UI display"""
-    try:
-        data = request.get_json()
-        session_id = data.get('session_id', 'default')
-        database = data.get('database')
-        
-        if not database:
-            return jsonify({"success": False, "error": "Database is required"}), 400
-        
-        history = memory_manager.get_conversation_history(session_id, database)
-        
-        formatted_history = []
-        total_queries = 0
-        total_rows = 0
-        
-        for i, message in enumerate(history):
-            if message['role'] == 'user':
-                # This is a user query
-                history_item = {
-                    'type': 'query',
-                    'timestamp': message['timestamp'],
-                    'content': message['content'],
-                    'sql_query': None,
-                    'results': None,
-                    'message_id': i
-                }
-                
-                # Look ahead for assistant response
-                if i + 1 < len(history) and history[i + 1]['role'] == 'assistant':
-                    assistant_msg = history[i + 1]
-                    history_item['sql_query'] = assistant_msg.get('sql_query')
-                    if assistant_msg.get('results_summary'):
-                        results = assistant_msg['results_summary']
-                        history_item['results'] = {
-                            'row_count': results.get('row_count', 0),
-                            'columns': results.get('columns', []),
-                            'execution_time': results.get('execution_time', 0)
-                        }
-                        total_queries += 1
-                        total_rows += results.get('row_count', 0)
-                
-                formatted_history.append(history_item)
-        
-        # Calculate session duration
-        session_duration = "Active session"
-        if formatted_history:
-            try:
-                first_time = datetime.fromisoformat(formatted_history[0]['timestamp'].replace('Z', '+00:00'))
-                last_time = datetime.fromisoformat(formatted_history[-1]['timestamp'].replace('Z', '+00:00'))
-                duration = last_time - first_time
-                minutes = duration.total_seconds() / 60
-                
-                if minutes < 1:
-                    session_duration = "Less than 1 minute"
-                elif minutes < 60:
-                    session_duration = f"{int(minutes)} minutes"
-                else:
-                    hours = minutes / 60
-                    session_duration = f"{hours:.1f} hours"
-            except:
-                session_duration = "Active session"
-        
-        # Analyze query patterns
-        query_types = {
-            'SELECT': 0,
-            'COUNT': 0,
-            'AGGREGATE': 0,
-            'FILTER': 0
-        }
-        
-        for message in history:
-            if message.get('sql_query'):
-                sql = message['sql_query'].upper()
-                if 'COUNT(' in sql:
-                    query_types['COUNT'] += 1
-                if any(agg in sql for agg in ['SUM(', 'AVG(', 'MAX(', 'MIN(']):
-                    query_types['AGGREGATE'] += 1
-                if 'WHERE' in sql:
-                    query_types['FILTER'] += 1
-                query_types['SELECT'] += 1
-        
-        # Determine most active period (simplified)
-        most_active_period = "Various times"
-        if formatted_history:
-            try:
-                hours = []
-                for conv in formatted_history:
-                    dt = datetime.fromisoformat(conv['timestamp'].replace('Z', '+00:00'))
-                    hours.append(dt.hour)
-                
-                if hours:
-                    avg_hour = sum(hours) / len(hours)
-                    if 5 <= avg_hour < 12:
-                        most_active_period = "Morning"
-                    elif 12 <= avg_hour < 17:
-                        most_active_period = "Afternoon"
-                    elif 17 <= avg_hour < 22:
-                        most_active_period = "Evening"
-                    else:
-                        most_active_period = "Night"
-            except:
-                most_active_period = "Various times"
-        
-        return jsonify({
-            "success": True,
-            "history": formatted_history,
-            "stats": {
-                "total_queries": total_queries,
-                "total_rows_processed": total_rows,
-                "session_duration": session_duration
-            },
-            "insights": {
-                "query_patterns": query_types,
-                "most_active_period": most_active_period,
-                "total_interactions": len([m for m in history if m['role'] == 'user'])
-            }
-        })
-    except Exception as e:
-        logger.error(f"Error getting formatted memory history: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route('/api/memory/export', methods=['POST'])
-def export_memory():
-    """Export conversation memory as JSON"""
-    try:
-        data = request.get_json()
-        session_id = data.get('session_id', 'default')
-        database = data.get('database')
-        
-        if not database:
-            return jsonify({"success": False, "error": "Database is required"}), 400
-        
-        history = memory_manager.get_conversation_history(session_id, database)
-        
-        export_data = {
-            "export_info": {
-                "exported_at": datetime.utcnow().isoformat(),
-                "session_id": session_id,
-                "database": database,
-                "total_messages": len(history)
-            },
-            "conversation_history": history,
-            "schema_learning": memory_manager.get_schema_learning(session_id, database)
-        }
-        
-        return jsonify({
-            "success": True,
-            "export_data": export_data,
-            "filename": f"sql_assistant_memory_{database}_{session_id[:8]}.json"
-        })
-    except Exception as e:
-        logger.error(f"Error exporting memory: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/clear-cache', methods=['POST'])
