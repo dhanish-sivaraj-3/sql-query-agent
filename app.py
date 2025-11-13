@@ -48,6 +48,9 @@ HTML_TEMPLATE = '''
                 <span id="selectedDb" class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm hidden">
                     <i class="fas fa-table mr-1"></i>Database: None
                 </span>
+                <span id="memoryStatus" class="px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm hidden">
+                    <i class="fas fa-brain mr-1"></i>Memory: Inactive
+                </span>
             </div>
         </div>
 
@@ -153,6 +156,13 @@ HTML_TEMPLATE = '''
                     >
                         <i class="fas fa-trash mr-2"></i>Clear History
                     </button>
+                    <button 
+                        type="button"
+                        id="clearMemory"
+                        class="px-6 py-3 bg-purple-500 text-white rounded-xl hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 font-semibold transition duration-200"
+                    >
+                        <i class="fas fa-brain mr-2"></i>Clear Memory
+                    </button>
                 </div>
             </form>
         </div>
@@ -176,6 +186,16 @@ HTML_TEMPLATE = '''
                 <i class="fas fa-history mr-2"></i>Conversation History
             </h3>
             <div id="historyList" class="space-y-3"></div>
+        </div>
+
+        <!-- Memory Information -->
+        <div id="memorySection" class="bg-purple-50 rounded-2xl p-6 mt-8 hidden">
+            <h3 class="text-xl font-semibold text-purple-800 mb-4">
+                <i class="fas fa-brain mr-2"></i>Memory Context
+            </h3>
+            <div id="memoryInfo" class="text-purple-700">
+                <p>No memory context available yet. Start asking questions to build conversation memory.</p>
+            </div>
         </div>
 
         <!-- Example Queries -->
@@ -326,6 +346,9 @@ HTML_TEMPLATE = '''
             
             // Load database info
             await loadDatabaseInfo(database, isCustom);
+            
+            // Load memory context
+            await loadMemoryContext();
             
             // Scroll to query form
             document.getElementById('queryFormSection').scrollIntoView({ behavior: 'smooth' });
@@ -486,6 +509,93 @@ HTML_TEMPLATE = '''
             }
         }
         
+        // Load memory context
+        async function loadMemoryContext() {
+            if (!currentDatabase) return;
+            
+            try {
+                const response = await fetch('/api/memory/summary', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        database: currentDatabase
+                    })
+                });
+                
+                const data = await response.json();
+                const memorySection = document.getElementById('memorySection');
+                const memoryInfo = document.getElementById('memoryInfo');
+                const memoryStatus = document.getElementById('memoryStatus');
+                
+                if (data.success) {
+                    memorySection.classList.remove('hidden');
+                    memoryInfo.innerHTML = `
+                        <div class="bg-white rounded-lg p-4 border border-purple-200">
+                            <div class="flex items-center justify-between mb-2">
+                                <span class="font-semibold text-purple-800">Conversation Context</span>
+                                <span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">
+                                    ${data.total_conversations} conversation${data.total_conversations !== 1 ? 's' : ''}
+                                </span>
+                            </div>
+                            <p class="text-purple-700 text-sm">${data.summary}</p>
+                            ${data.learned_schema.tables.length > 0 ? `
+                                <div class="mt-3">
+                                    <p class="font-medium text-purple-800 text-sm">Learned Tables:</p>
+                                    <div class="flex flex-wrap gap-1 mt-1">
+                                        ${data.learned_schema.tables.map(table => 
+                                            `<span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">${table}</span>`
+                                        ).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                    
+                    // Update memory status
+                    memoryStatus.classList.remove('hidden');
+                    memoryStatus.innerHTML = '<i class="fas fa-brain mr-1"></i>Memory: Active';
+                    memoryStatus.className = 'px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm';
+                }
+            } catch (error) {
+                console.error('Error loading memory context:', error);
+            }
+        }
+        
+        // Clear memory
+        async function clearMemory() {
+            if (!currentDatabase) {
+                alert('Please select a database first');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/memory/clear', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        database: currentDatabase
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    console.log('Memory cleared:', data.message);
+                    alert('Memory cleared successfully!');
+                    // Reload memory context
+                    await loadMemoryContext();
+                }
+            } catch (error) {
+                console.error('Error clearing memory:', error);
+                alert('Error clearing memory: ' + error.message);
+            }
+        }
+        
         // Handle custom database connection with better error handling
         document.getElementById('connectCustomDb').addEventListener('click', async function() {
             const server = document.getElementById('customServer').value;
@@ -629,6 +739,9 @@ HTML_TEMPLATE = '''
             originalPassword = null;
         });
 
+        // Clear memory button
+        document.getElementById('clearMemory').addEventListener('click', clearMemory);
+
         async function processQuery(query, database) {
             const button = document.querySelector('#queryForm button');
             const resultsDiv = document.getElementById('results');
@@ -670,6 +783,8 @@ HTML_TEMPLATE = '''
                 if (data.success) {
                     displaySuccessResults(data);
                     addToHistory(query, data, database);
+                    // Update memory context after successful query
+                    await loadMemoryContext();
                 } else {
                     displayError(data.error);
                 }
@@ -701,6 +816,7 @@ HTML_TEMPLATE = '''
                             <span class="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm">
                                 ${data.execution_result.row_count} rows • ${data.execution_time_ms}ms
                             </span>
+                            ${data.has_memory ? '<span class="px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm"><i class="fas fa-brain mr-1"></i>Memory</span>' : ''}
                         </div>
                     </div>
                     
@@ -1108,6 +1224,14 @@ def handle_query():
         
         logger.info(f"Processing query for database {database}: {query}")
         
+        # Store user query in memory BEFORE processing
+        memory_manager.add_message(
+            session_id=session_id,
+            database=database,
+            role='user',
+            content=query
+        )
+        
         # Determine which connector to use
         current_connector = None
         
@@ -1122,7 +1246,7 @@ def handle_query():
                 custom_config={
                     'server': custom_connection.get('server'),
                     'user': custom_connection.get('username'),
-                    'password': custom_connection.get('password'),  # CRITICAL: Make sure password is included
+                    'password': custom_connection.get('password'),
                     'port': custom_connection.get('port', '3306')
                 }
             )
@@ -1138,7 +1262,7 @@ def handle_query():
                 custom_config={
                     'server': connection_info.get('server'),
                     'user': connection_info.get('username'),
-                    'password': connection_info.get('password'),  # CRITICAL: Make sure password is included
+                    'password': connection_info.get('password'),
                     'port': connection_info.get('port', '3306')
                 }
             )
@@ -1158,11 +1282,12 @@ def handle_query():
         
         logger.info("Database connection test successful, generating SQL with Gemini...")
         
-        # Generate SQL query using Gemini - pass the current_connector
+        # Generate SQL query using Gemini - pass the session_id for memory
         llm_result = gemini_client.generate_sql_query(
             query, 
-            current_connector,  # Pass the actual connector we're using
-            database
+            current_connector,
+            database,
+            session_id=session_id  # Pass session_id for memory
         )
         
         if not llm_result['success']:
@@ -1199,7 +1324,17 @@ def handle_query():
             database
         )
         
-        # Update conversation history
+        # Store assistant response in memory AFTER execution
+        memory_manager.add_message(
+            session_id=session_id,
+            database=database,
+            role='assistant',
+            content=f"Executed query: {query}. Results: {results_summary['row_count']} rows found.",
+            sql_query=generated_sql,
+            results_summary=results_summary
+        )
+        
+        # Update conversation history (for frontend display)
         history_key = f"{session_id}_{database}"
         if history_key not in conversation_history:
             conversation_history[history_key] = []
@@ -1207,7 +1342,8 @@ def handle_query():
         conversation_history[history_key].append({
             'query': query,
             'sql': generated_sql,
-            'timestamp': datetime.utcnow().isoformat()
+            'timestamp': datetime.utcnow().isoformat(),
+            'results_summary': results_summary
         })
         
         if len(conversation_history[history_key]) > 10:
@@ -1229,7 +1365,8 @@ def handle_query():
             "execution_time_ms": round(execution_time_ms, 2),
             "model_used": llm_result['model_used'],
             "database": database,
-            "session_id": session_id
+            "session_id": session_id,
+            "has_memory": True  # Indicate that memory is being used
         })
         
     except Exception as e:
@@ -1249,6 +1386,75 @@ def get_schema(database):
         logger.error(f"Error fetching schema for {database}: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route('/api/memory/history', methods=['POST'])
+def get_memory_history():
+    """Get conversation history from memory"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if not database:
+            return jsonify({"success": False, "error": "Database is required"}), 400
+        
+        history = memory_manager.get_conversation_history(session_id, database)
+        
+        return jsonify({
+            "success": True,
+            "history": history,
+            "total_messages": len(history)
+        })
+    except Exception as e:
+        logger.error(f"Error getting memory history: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/memory/clear', methods=['POST'])
+def clear_memory():
+    """Clear conversation memory"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if database:
+            memory_manager.clear_conversation(session_id, database)
+            message = f"Cleared memory for database: {database}"
+        else:
+            memory_manager.clear_all_conversations()
+            message = "Cleared all conversation memory"
+        
+        return jsonify({
+            "success": True,
+            "message": message
+        })
+    except Exception as e:
+        logger.error(f"Error clearing memory: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/memory/summary', methods=['POST'])
+def get_memory_summary():
+    """Get memory summary"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if not database:
+            return jsonify({"success": False, "error": "Database is required"}), 400
+        
+        summary = memory_manager.get_conversation_summary(session_id, database)
+        learned_schema = memory_manager.get_schema_learning(session_id, database)
+        
+        return jsonify({
+            "success": True,
+            "summary": summary,
+            "learned_schema": learned_schema,
+            "total_conversations": len(memory_manager.memory_store)
+        })
+    except Exception as e:
+        logger.error(f"Error getting memory summary: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route('/api/clear-cache', methods=['POST'])
 def clear_cache():
     """Clear Gemini schema cache"""
@@ -1263,4 +1469,5 @@ if __name__ == '__main__':
     logger.info(f"🚀 Starting Multi-Database SQL Assistant on port {port}")
     logger.info(f"📊 Default databases: {config.DEFAULT_DATABASES}")
     logger.info(f"🔗 Database server: {config.DB_SERVER}:{config.DB_PORT}")
+    logger.info(f"🧠 Memory system: Enabled with {memory_manager.max_conversations} max conversations")
     app.run(host='0.0.0.0', port=port, debug=False)
