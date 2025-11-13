@@ -18,7 +18,7 @@ gcloud run deploy sql-query-assistant \
     --region us-central1 \
     --platform managed \
     --allow-unauthenticated \
-    --set-env-vars="DB_SERVER=136.113.43.32,DB_PORT=3306,DB_USER=sql_assistant,DB_PASSWORD=Assistant@123,GCP_REGION=us-central1,GEMINI_MODEL=gemini-2.5-flash,MAX_ROWS_RETURN=1000,GEMINI_API_KEY=AIzaSyC7P-qFcIWRjQADmPV9jPmlQCFyb5I_N8o" \
+    --set-env-vars="DB_SERVER=136.113.43.32,DB_PORT=3306,DB_USER=sql_assistant,DB_PASSWORD=Assistant@123,GCP_REGION=us-central1,GEMINI_MODEL=gemini-2.5-flash,MAX_ROWS_RETURN=1000,GEMINI_API_KEY=" \
     --cpu=1 \
     --memory=1Gi \
     --timeout=300
