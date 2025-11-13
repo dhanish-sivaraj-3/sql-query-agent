@@ -1,288 +1,1798 @@
-# llm/memory_manager.py
-import json
+from flask import Flask, jsonify, request, render_template_string
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Any
-import hashlib
+from datetime import datetime
+import os
+import json
+import signal
+from llm.memory_manager import memory_manager
+from config.settings import config
+from database.connector import db_connector, DatabaseConnector
+from llm.gemini_client import gemini_client
 
+# Configure standard Python logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class MemoryManager:
-    def __init__(self, max_conversations=10, max_messages_per_conversation=20):
-        self.memory_store = {}
-        self.max_conversations = max_conversations
-        self.max_messages_per_conversation = max_messages_per_conversation
-    
-    def _get_conversation_key(self, session_id: str, database: str) -> str:
-        """Generate a unique key for conversation"""
-        key_string = f"{session_id}_{database}"
-        return hashlib.md5(key_string.encode()).hexdigest()
-    
-    def add_message(self, session_id: str, database: str, role: str, content: str, 
-                   sql_query: str = None, results_summary: Dict = None):
-        """Add a message to conversation history"""
-        conv_key = self._get_conversation_key(session_id, database)
-        
-        if conv_key not in self.memory_store:
-            self.memory_store[conv_key] = {
-                'session_id': session_id,
-                'database': database,
-                'messages': [],
-                'created_at': datetime.utcnow().isoformat(),
-                'last_accessed': datetime.utcnow().isoformat()
+app = Flask(__name__)
+
+# Store conversation history per database
+conversation_history = {}
+
+# Store custom connections by database
+custom_connections = {}
+
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Multi-Database SQL Assistant</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-50 min-h-screen p-4">
+    <div class="max-w-7xl mx-auto">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <div class="flex items-center justify-center mb-4">
+                <i class="fas fa-database text-4xl text-blue-500 mr-3"></i>
+                <h1 class="text-4xl font-bold text-gray-800">Multi-Database SQL Assistant</h1>
+            </div>
+            <p class="text-xl text-gray-600">Query Multiple Databases with Natural Language</p>
+            <div class="mt-4 flex justify-center space-x-4">
+                <span id="dbStatus" class="px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm">
+                    <i class="fas fa-database mr-1"></i>Database: Checking...
+                </span>
+                <span id="aiStatus" class="px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm">
+                    <i class="fas fa-robot mr-1"></i>AI: Checking...
+                </span>
+                <span id="selectedDb" class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm hidden">
+                    <i class="fas fa-table mr-1"></i>Database: None
+                </span>
+                <span id="memoryStatus" class="px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm hidden">
+                    <i class="fas fa-brain mr-1"></i>Memory: Inactive
+                </span>
+            </div>
+        </div>
+
+        <!-- Database Selection -->
+        <div class="bg-white rounded-2xl shadow-lg p-6 mb-8">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">
+                <i class="fas fa-database mr-2"></i>Select Database
+            </h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-4" id="databaseList">
+                <p class="text-gray-500 col-span-4 text-center py-4">Loading databases...</p>
+            </div>
+            
+            <!-- Custom Database Connection -->
+            <div class="mt-6 p-4 bg-gray-50 rounded-lg">
+                <h3 class="text-lg font-semibold text-gray-700 mb-3">
+                    <i class="fas fa-plug mr-2"></i>Connect Custom Database
+                </h3>
+                
+                <!-- Database Type Selection -->
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Database Type</label>
+                    <div class="flex space-x-4">
+                        <label class="inline-flex items-center">
+                            <input type="radio" name="dbType" value="mysql" checked class="db-type-radio">
+                            <span class="ml-2">MySQL</span>
+                        </label>
+                        <label class="inline-flex items-center">
+                            <input type="radio" name="dbType" value="sqlserver" class="db-type-radio">
+                            <span class="ml-2">SQL Server</span>
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Server</label>
+                        <input type="text" id="customServer" placeholder="e.g., gateway01.ap-southeast-1.prod.aws.tidbcloud.com" 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Port</label>
+                        <input type="text" id="customPort" placeholder="3306 for MySQL, 1433 for SQL Server" 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                        <input type="text" id="customUsername" placeholder="Database username" 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                        <input type="password" id="customPassword" placeholder="Database password" 
+                               class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                </div>
+                
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Database Name (Optional)</label>
+                    <input type="text" id="customDatabase" placeholder="Leave empty to see all databases" 
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                
+                <button id="connectCustomDb" 
+                        class="px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500">
+                    <i class="fas fa-link mr-2"></i>Connect to Custom Database
+                </button>
+            </div>
+        </div>
+
+        <!-- Query Form (Initially Hidden) -->
+        <div id="queryFormSection" class="bg-white rounded-2xl shadow-lg p-6 mb-8 hidden">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">
+                <i class="fas fa-comment-dots mr-2"></i>Ask Questions About Your Data
+            </h2>
+            <form id="queryForm" class="space-y-4">
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">
+                        What would you like to know about <span id="currentDbName" class="font-semibold">your database</span>?
+                    </label>
+                    <textarea 
+                        id="query" 
+                        name="query"
+                        rows="3"
+                        placeholder="Example: Show me the top 10 products by sales..."
+                        class="w-full px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
+                        required
+                    ></textarea>
+                </div>
+                <div class="flex space-x-4">
+                    <button 
+                        type="submit"
+                        class="flex-1 px-6 py-3 bg-blue-500 text-white rounded-xl hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 font-semibold text-lg transition duration-200"
+                    >
+                        <i class="fas fa-paper-plane mr-2"></i>Generate & Execute SQL
+                    </button>
+                    <button 
+                        type="button"
+                        id="clearHistory"
+                        class="px-6 py-3 bg-gray-500 text-white rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-500 font-semibold transition duration-200"
+                    >
+                        <i class="fas fa-trash mr-2"></i>Clear History
+                    </button>
+                    <button 
+                        type="button"
+                        id="clearMemory"
+                        class="px-6 py-3 bg-purple-500 text-white rounded-xl hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 font-semibold transition duration-200"
+                    >
+                        <i class="fas fa-brain mr-2"></i>Clear Memory
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- Database Info -->
+        <div id="databaseInfo" class="bg-blue-50 rounded-2xl p-6 mb-8 hidden">
+            <h3 class="text-lg font-semibold text-blue-800 mb-3">
+                <i class="fas fa-info-circle mr-2"></i>Database Schema Information
+            </h3>
+            <div id="tablesList" class="text-blue-700">
+                <!-- Tables with columns will be listed here -->
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="results" class="hidden"></div>
+
+        <!-- Enhanced Memory Information -->
+        <div id="memorySection" class="bg-purple-50 rounded-2xl p-6 mt-8 hidden">
+            <h3 class="text-xl font-semibold text-purple-800 mb-4">
+                <i class="fas fa-brain mr-2"></i>Memory & Analytics
+            </h3>
+            <div id="memoryInfo" class="text-purple-700">
+                <p>No memory context available yet. Start asking questions to build conversation memory.</p>
+            </div>
+        </div>
+
+        <!-- Conversation History -->
+        <div id="historySection" class="bg-white rounded-2xl shadow-lg p-6 mt-8 hidden">
+            <h3 class="text-xl font-semibold text-gray-800 mb-4">
+                <i class="fas fa-history mr-2"></i>Conversation History
+            </h3>
+            <div id="historyList" class="space-y-3"></div>
+        </div>
+
+        <!-- Example Queries -->
+        <div class="bg-green-50 rounded-2xl p-6 mt-8">
+            <h3 class="text-lg font-semibold text-green-800 mb-3">
+                <i class="fas fa-lightbulb mr-2"></i>Try These Example Queries:
+            </h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <button class="example-btn bg-white text-green-600 px-4 py-3 rounded-lg border border-green-200 hover:bg-green-50 transition duration-200 text-left">
+                    "Show top 10 products by sales"
+                </button>
+                <button class="example-btn bg-white text-green-600 px-4 py-3 rounded-lg border border-green-200 hover:bg-green-50 transition duration-200 text-left">
+                    "What's the monthly revenue trend?"
+                </button>
+                <button class="example-btn bg-white text-green-600 px-4 py-3 rounded-lg border border-green-200 hover:bg-green-50 transition duration-200 text-left">
+                    "How many patients were admitted last month?"
+                </button>
+                <button class="example-btn bg-white text-green-600 px-4 py-3 rounded-lg border border-green-200 hover:bg-green-50 transition duration-200 text-left">
+                    "Show customer distribution by region"
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentDatabase = null;
+        let sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
+        let currentConnectionInfo = null;
+        let originalPassword = null;
+
+        // Check system status on load
+        async function checkSystemStatus() {
+            try {
+                console.log('Checking system status...');
+                const response = await fetch('/api/health');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                console.log('System status response:', data);
+                
+                // Update database status
+                const dbStatus = document.getElementById('dbStatus');
+                if (data.database_connected) {
+                    dbStatus.innerHTML = '<i class="fas fa-database mr-1"></i>Database: Connected';
+                    dbStatus.className = 'px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm';
+                } else {
+                    dbStatus.innerHTML = '<i class="fas fa-database mr-1"></i>Database: Disconnected';
+                    dbStatus.className = 'px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm';
+                }
+                
+                // Update AI status
+                const aiStatus = document.getElementById('aiStatus');
+                if (data.gemini_connected) {
+                    aiStatus.innerHTML = '<i class="fas fa-robot mr-1"></i>AI: Connected';
+                    aiStatus.className = 'px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm';
+                } else {
+                    aiStatus.innerHTML = '<i class="fas fa-robot mr-1"></i>AI: Disconnected';
+                    aiStatus.className = 'px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm';
+                }
+                
+                console.log('System status updated successfully');
+                
+                // Load databases after status check
+                await loadDatabases();
+                
+            } catch (error) {
+                console.error('Error checking system status:', error);
+                // Set both to error state
+                const dbStatus = document.getElementById('dbStatus');
+                const aiStatus = document.getElementById('aiStatus');
+                
+                dbStatus.innerHTML = '<i class="fas fa-database mr-1"></i>Database: Error';
+                dbStatus.className = 'px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm';
+                
+                aiStatus.innerHTML = '<i class="fas fa-robot mr-1"></i>AI: Error';
+                aiStatus.className = 'px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm';
             }
-        
-        message = {
-            'role': role,
-            'content': content,
-            'timestamp': datetime.utcnow().isoformat(),
-            'sql_query': sql_query,
-            'results_summary': results_summary
         }
         
-        self.memory_store[conv_key]['messages'].append(message)
-        self.memory_store[conv_key]['last_accessed'] = datetime.utcnow().isoformat()
+        async function loadDatabases() {
+            try {
+                console.log('Loading databases...');
+                const response = await fetch('/api/databases');
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                console.log('Databases response:', data);
+                
+                const databaseList = document.getElementById('databaseList');
+                
+                if (data.success && data.databases && data.databases.length > 0) {
+                    databaseList.innerHTML = ''; // Clear loading message
+                    
+                    data.databases.forEach(db => {
+                        const dbCard = document.createElement('div');
+                        dbCard.className = 'bg-blue-50 rounded-lg p-4 border border-blue-200 cursor-pointer hover:bg-blue-100 transition duration-200';
+                        dbCard.innerHTML = `
+                            <div class="flex items-center">
+                                <i class="fas fa-database text-blue-500 mr-3"></i>
+                                <div>
+                                    <h3 class="font-semibold text-blue-800">${db}</h3>
+                                    <p class="text-blue-600 text-sm">Click to select</p>
+                                </div>
+                            </div>
+                        `;
+                        dbCard.addEventListener('click', () => selectDatabase(db));
+                        databaseList.appendChild(dbCard);
+                    });
+                    
+                    console.log('Databases loaded successfully:', data.databases);
+                } else {
+                    databaseList.innerHTML = '<p class="text-gray-500 col-span-4 text-center py-4">No databases found or error loading databases.</p>';
+                    console.error('No databases found or error:', data.error);
+                }
+            } catch (error) {
+                console.error('Error loading databases:', error);
+                const databaseList = document.getElementById('databaseList');
+                databaseList.innerHTML = '<p class="text-red-500 col-span-4 text-center py-4">Error loading databases. Check console for details.</p>';
+            }
+        }
         
-        # Limit messages per conversation
-        if len(self.memory_store[conv_key]['messages']) > self.max_messages_per_conversation:
-            self.memory_store[conv_key]['messages'] = self.memory_store[conv_key]['messages'][-self.max_messages_per_conversation:]
+        // Select database
+        async function selectDatabase(database, isCustom = false, serverInfo = null) {
+            console.log('Selecting database:', database, 'Custom:', isCustom);
+            currentDatabase = database;
+            
+            // Update UI
+            document.getElementById('selectedDb').classList.remove('hidden');
+            if (isCustom && serverInfo) {
+                document.getElementById('selectedDb').innerHTML = `<i class="fas fa-table mr-1"></i>Database: ${database} (${serverInfo})`;
+            } else {
+                document.getElementById('selectedDb').innerHTML = `<i class="fas fa-table mr-1"></i>Database: ${database}`;
+            }
+            document.getElementById('queryFormSection').classList.remove('hidden');
+            document.getElementById('currentDbName').textContent = database;
+            
+            // Store custom connection info globally for this database
+            if (isCustom && currentConnectionInfo) {
+                // Register this database with the custom connection
+                await registerCustomDatabase(database, currentConnectionInfo);
+            }
+            
+            // Load database info
+            await loadDatabaseInfo(database, isCustom);
+            
+            // Load enhanced memory context
+            await loadEnhancedMemoryContext();
+            
+            // Scroll to query form
+            document.getElementById('queryFormSection').scrollIntoView({ behavior: 'smooth' });
+        }
         
-        # Clean up old conversations
-        self._cleanup_old_conversations()
+        // Register custom database with backend
+        async function registerCustomDatabase(database, connectionInfo) {
+            try {
+                const response = await fetch('/api/register-custom-db', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        database: database,
+                        connection_info: connectionInfo
+                    })
+                });
+                const data = await response.json();
+                console.log('Custom database registration:', data);
+            } catch (error) {
+                console.error('Error registering custom database:', error);
+            }
+        }
         
-        logger.info(f"Added message to conversation {conv_key}. Total messages: {len(self.memory_store[conv_key]['messages'])}")
+        function showDatabaseSelection(databases, server, dbType, connectionData) {
+            const databaseList = document.getElementById('databaseList');
+            
+            // Clear existing custom databases to avoid duplicates
+            const existingCustomDbs = databaseList.querySelectorAll('.bg-green-50');
+            existingCustomDbs.forEach(db => db.remove());
+            
+            databases.forEach(db => {
+                const dbCard = document.createElement('div');
+                dbCard.className = 'bg-green-50 rounded-lg p-4 border border-green-200 cursor-pointer hover:bg-green-100 transition duration-200 mb-2';
+                dbCard.innerHTML = `
+                    <div class="flex items-center">
+                        <i class="fas fa-database text-green-500 mr-3"></i>
+                        <div>
+                            <h3 class="font-semibold text-green-800">${db}</h3>
+                            <p class="text-green-600 text-sm">Custom ${dbType.toUpperCase()} • ${server}</p>
+                        </div>
+                    </div>
+                `;
+                dbCard.addEventListener('click', () => {
+                    selectDatabase(db, true, connectionData.server_info);
+                    // Store connection info for future queries - PRESERVE PASSWORD
+                    currentConnectionInfo = {
+                        server: server,
+                        db_type: dbType,
+                        username: document.getElementById('customUsername').value,
+                        password: originalPassword, // Use stored password, not from DOM
+                        port: document.getElementById('customPort').value || (dbType === 'mysql' ? '3306' : '1433')
+                    };
+                });
+                databaseList.appendChild(dbCard);
+            });
+            
+            // Scroll to show the new databases
+            databaseList.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+        
+        async function loadDatabaseInfo(database, isCustom = false) {
+            try {
+                console.log('Loading database info for:', database, 'Custom:', isCustom);
+                
+                const requestBody = {
+                    database: database,
+                    is_custom: isCustom
+                };
+                
+                // Add custom connection info if available - FIXED: Always use stored connection info
+                if (currentConnectionInfo) {
+                    requestBody.custom_connection = {
+                        server: currentConnectionInfo.server,
+                        db_type: currentConnectionInfo.db_type,
+                        username: currentConnectionInfo.username,
+                        password: currentConnectionInfo.password, // CRITICAL: Include password
+                        port: currentConnectionInfo.port
+                    };
+                }
+                
+                const response = await fetch(`/api/databases/${encodeURIComponent(database)}/tables`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                console.log('Database info response:', data);
+                
+                const databaseInfo = document.getElementById('databaseInfo');
+                const tablesList = document.getElementById('tablesList');
+                
+                if (data.success && data.tables && Object.keys(data.tables).length > 0) {
+                    databaseInfo.classList.remove('hidden');
+                    
+                    let tablesHTML = `
+                        <div class="flex items-center mb-4">
+                            <i class="fas fa-info-circle mr-2"></i>
+                            <span class="font-semibold">Database Schema: ${database}</span>
+                            <span class="ml-2 px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs">
+                                ${data.table_count} table${data.table_count !== 1 ? 's' : ''}
+                            </span>
+                        </div>
+                    `;
+                    
+                    Object.entries(data.tables).forEach(([tableName, columns]) => {
+                        tablesHTML += `
+                            <div class="bg-white rounded-lg p-4 border border-blue-200 mb-4 shadow-sm">
+                                <div class="flex items-center justify-between mb-3">
+                                    <div class="flex items-center">
+                                        <i class="fas fa-table text-blue-500 mr-2"></i>
+                                        <span class="font-semibold text-blue-800 text-lg">${tableName}</span>
+                                    </div>
+                                    <span class="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">
+                                        ${columns.length} column${columns.length !== 1 ? 's' : ''}
+                                    </span>
+                                </div>
+                                <div class="border-t border-gray-200 pt-3">
+                                    <p class="text-sm font-medium text-gray-700 mb-2">Columns:</p>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                                        ${columns.map(col => `
+                                            <div class="text-sm bg-gray-50 rounded-lg px-3 py-2 border border-gray-200 hover:bg-blue-50 transition-colors">
+                                                <div class="flex items-center justify-between">
+                                                    <span class="font-medium text-gray-900">${col.name}</span>
+                                                    <div class="flex space-x-1">
+                                                        ${col.primary_key ? '<span class="px-1 bg-green-100 text-green-800 rounded text-xs font-bold" title="Primary Key">PK</span>' : ''}
+                                                        ${!col.nullable ? '<span class="px-1 bg-red-100 text-red-800 rounded text-xs font-bold" title="Not Null">NN</span>' : ''}
+                                                    </div>
+                                                </div>
+                                                <div class="text-xs text-gray-500 mt-1">${col.type}</div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    tablesList.innerHTML = tablesHTML;
+                } else {
+                    databaseInfo.classList.remove('hidden');
+                    tablesList.innerHTML = `<p class="text-blue-700 p-4 bg-blue-50 rounded-lg">${data.error || 'No tables found in this database'}</p>`;
+                }
+            } catch (error) {
+                console.error('Error loading database info:', error);
+                const databaseInfo = document.getElementById('databaseInfo');
+                const tablesList = document.getElementById('tablesList');
+                databaseInfo.classList.remove('hidden');
+                tablesList.innerHTML = '<p class="text-red-700 p-4 bg-red-50 rounded-lg">Error loading database schema information. Check console for details.</p>';
+            }
+        }
+        
+        // Enhanced memory context loading
+        async function loadEnhancedMemoryContext() {
+            if (!currentDatabase) return;
+            
+            try {
+                const [summaryResponse, historyResponse] = await Promise.all([
+                    fetch('/api/memory/enhanced-summary', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId, database: currentDatabase })
+                    }),
+                    fetch('/api/memory/formatted-history', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ session_id: sessionId, database: currentDatabase })
+                    })
+                ]);
+
+                const summaryData = await summaryResponse.json();
+                const historyData = await historyResponse.json();
+                
+                const memorySection = document.getElementById('memorySection');
+                const memoryInfo = document.getElementById('memoryInfo');
+                const memoryStatus = document.getElementById('memoryStatus');
+                
+                if (summaryData.success && historyData.success) {
+                    memorySection.classList.remove('hidden');
+                    
+                    let memoryHTML = `
+                        <div class="space-y-4">
+                            <!-- Memory Stats -->
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                                <div class="bg-white rounded-lg p-3 border border-purple-200 text-center">
+                                    <div class="text-2xl font-bold text-purple-600">${historyData.stats.total_queries}</div>
+                                    <div class="text-xs text-purple-500">Total Queries</div>
+                                </div>
+                                <div class="bg-white rounded-lg p-3 border border-purple-200 text-center">
+                                    <div class="text-2xl font-bold text-purple-600">${historyData.stats.total_rows_processed}</div>
+                                    <div class="text-xs text-purple-500">Rows Processed</div>
+                                </div>
+                                <div class="bg-white rounded-lg p-3 border border-purple-200 text-center">
+                                    <div class="text-lg font-bold text-purple-600">${historyData.insights.most_active_period}</div>
+                                    <div class="text-xs text-purple-500">Active Period</div>
+                                </div>
+                                <div class="bg-white rounded-lg p-3 border border-purple-200 text-center">
+                                    <div class="text-lg font-bold text-purple-600">${historyData.stats.session_duration}</div>
+                                    <div class="text-xs text-purple-500">Session Duration</div>
+                                </div>
+                            </div>
+
+                            <!-- Query Patterns -->
+                            <div class="bg-white rounded-lg p-4 border border-purple-200">
+                                <h4 class="font-semibold text-purple-800 mb-3 flex items-center">
+                                    <i class="fas fa-chart-pie mr-2"></i>Query Patterns
+                                </h4>
+                                <div class="flex flex-wrap gap-2">
+                                    ${Object.entries(historyData.insights.query_patterns)
+                                        .filter(([_, count]) => count > 0)
+                                        .map(([type, count]) => `
+                                            <span class="px-2 py-1 bg-purple-100 text-purple-800 rounded-full text-xs">
+                                                ${type}: ${count}
+                                            </span>
+                                        `).join('')}
+                                </div>
+                            </div>
+
+                            <!-- Recent Conversations -->
+                            <div class="bg-white rounded-lg p-4 border border-purple-200">
+                                <div class="flex justify-between items-center mb-3">
+                                    <h4 class="font-semibold text-purple-800 flex items-center">
+                                        <i class="fas fa-history mr-2"></i>Recent Conversations
+                                    </h4>
+                                    <button onclick="exportMemory()" class="px-3 py-1 bg-purple-500 text-white rounded-lg text-sm hover:bg-purple-600">
+                                        <i class="fas fa-download mr-1"></i>Export
+                                    </button>
+                                </div>
+                                <div class="space-y-3 max-h-60 overflow-y-auto">
+                                    ${historyData.history.length > 0 ? 
+                                        historyData.history.map(conv => `
+                                            <div class="border border-gray-200 rounded-lg p-3 hover:bg-purple-50 transition-colors">
+                                                <div class="flex justify-between items-start mb-2">
+                                                    <span class="text-xs text-gray-500">${formatTime(conv.timestamp)}</span>
+                                                    ${conv.results ? 
+                                                        `<span class="px-2 py-1 bg-green-100 text-green-800 rounded text-xs">${conv.results.row_count} rows</span>` 
+                                                        : '<span class="px-2 py-1 bg-gray-100 text-gray-800 rounded text-xs">Pending</span>'
+                                                    }
+                                                </div>
+                                                <p class="text-sm font-medium text-gray-800 mb-2">${conv.content}</p>
+                                                ${conv.sql_query ? `
+                                                    <details class="text-xs">
+                                                        <summary class="cursor-pointer text-purple-600 hover:text-purple-800">View SQL</summary>
+                                                        <pre class="mt-2 p-2 bg-gray-800 text-green-400 rounded overflow-x-auto text-sm">${conv.sql_query}</pre>
+                                                    </details>
+                                                ` : ''}
+                                            </div>
+                                        `).join('') 
+                                        : '<p class="text-gray-500 text-center py-4">No conversation history yet</p>'
+                                    }
+                                </div>
+                            </div>
+
+                            <!-- Learned Schema -->
+                            ${summaryData.learned_schema.tables.length > 0 ? `
+                                <div class="bg-white rounded-lg p-4 border border-purple-200">
+                                    <h4 class="font-semibold text-purple-800 mb-2 flex items-center">
+                                        <i class="fas fa-brain mr-2"></i>Learned Schema
+                                    </h4>
+                                    <div class="flex flex-wrap gap-1">
+                                        ${summaryData.learned_schema.tables.map(table => 
+                                            `<span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">${table}</span>`
+                                        ).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                    
+                    memoryInfo.innerHTML = memoryHTML;
+                    
+                    // Update memory status
+                    memoryStatus.classList.remove('hidden');
+                    memoryStatus.innerHTML = `<i class="fas fa-brain mr-1"></i>Memory: ${historyData.stats.total_queries} queries`;
+                    memoryStatus.className = 'px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm';
+                }
+            } catch (error) {
+                console.error('Error loading enhanced memory context:', error);
+            }
+        }
+        
+        // Export memory function
+        async function exportMemory() {
+            if (!currentDatabase) return;
+            
+            try {
+                const response = await fetch('/api/memory/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ session_id: sessionId, database: currentDatabase })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    // Create and download JSON file
+                    const blob = new Blob([JSON.stringify(data.export_data, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = data.filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    alert('Memory exported successfully!');
+                }
+            } catch (error) {
+                console.error('Error exporting memory:', error);
+                alert('Error exporting memory: ' + error.message);
+            }
+        }
+        
+        // Format time for display
+        function formatTime(timestamp) {
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+        
+        // Clear memory
+        async function clearMemory() {
+            if (!currentDatabase) {
+                alert('Please select a database first');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/memory/clear', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        database: currentDatabase
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    console.log('Memory cleared:', data.message);
+                    alert('Memory cleared successfully!');
+                    // Reload memory context
+                    await loadEnhancedMemoryContext();
+                }
+            } catch (error) {
+                console.error('Error clearing memory:', error);
+                alert('Error clearing memory: ' + error.message);
+            }
+        }
+        
+        // Handle custom database connection with better error handling
+        document.getElementById('connectCustomDb').addEventListener('click', async function() {
+            const server = document.getElementById('customServer').value;
+            const database = document.getElementById('customDatabase').value;
+            const username = document.getElementById('customUsername').value;
+            const password = document.getElementById('customPassword').value;
+            const port = document.getElementById('customPort').value;
+            const dbType = document.querySelector('input[name="dbType"]:checked').value;
+            
+            if (!server) {
+                alert('Please enter server address');
+                return;
+            }
+            
+            if (!username) {
+                alert('Please enter username');
+                return;
+            }
+            
+            if (!password) {
+                alert('Please enter password');
+                return;
+            }
+            
+            const connectBtn = document.getElementById('connectCustomDb');
+            const originalText = connectBtn.innerHTML;
+            
+            try {
+                // Show loading state
+                connectBtn.disabled = true;
+                connectBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Connecting...';
+                
+                // Store the password securely for future use
+                originalPassword = password;
+                
+                // Add timeout to fetch request
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+                
+                const response = await fetch('/api/connect-custom', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        server: server,
+                        database: database,
+                        db_type: dbType,
+                        username: username,
+                        password: password,
+                        port: port
+                    }),
+                    signal: controller.signal
+                });
+                
+                clearTimeout(timeoutId);
+                
+                // Check if response is JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text.substring(0, 500));
+                    throw new Error('Server returned an error page. Check database credentials and connection details.');
+                }
+                
+                const data = await response.json();
+                console.log('Custom connection response:', data);
+                
+                if (data.success) {
+                    // Store connection info for future queries
+                    currentConnectionInfo = {
+                        server: server,
+                        db_type: dbType,
+                        username: username,
+                        password: password, // Store the password
+                        port: port || (dbType === 'mysql' ? '3306' : '1433')
+                    };
+                    
+                    if (data.available_databases && data.available_databases.length > 0) {
+                        showDatabaseSelection(data.available_databases, server, dbType, data);
+                        alert('✅ Connection successful! Please select a database from the list below.');
+                    } else if (data.database) {
+                        selectDatabase(data.database, true, data.server_info);
+                        alert('✅ Connection successful! Database selected.');
+                    } else {
+                        alert('✅ Connected successfully but no databases found or selected.');
+                    }
+                    
+                    // Clear password field for security (but we have it stored in currentConnectionInfo)
+                    document.getElementById('customPassword').value = '';
+                    
+                } else {
+                    alert('❌ Failed to connect: ' + (data.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Connection error:', error);
+                
+                if (error.name === 'AbortError') {
+                    alert('❌ Connection timeout: The database server took too long to respond. Please check the server address and try again.');
+                } else if (error.message.includes('JSON')) {
+                    alert('❌ Connection error: The database server returned an unexpected response. Please check your credentials and connection details.');
+                } else {
+                    alert('❌ Connection error: ' + error.message);
+                }
+            } finally {
+                // Restore button state
+                connectBtn.disabled = false;
+                connectBtn.innerHTML = '<i class="fas fa-link mr-2"></i>Connect to Custom Database';
+            }
+        });
+
+        // Handle form submission
+        document.getElementById('queryForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            if (!currentDatabase) {
+                alert('Please select a database first');
+                return;
+            }
+            await processQuery(document.getElementById('query').value, currentDatabase);
+        });
+
+        // Handle example buttons
+        document.querySelectorAll('.example-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                if (!currentDatabase) {
+                    alert('Please select a database first');
+                    return;
+                }
+                document.getElementById('query').value = this.textContent.trim();
+                processQuery(this.textContent.trim(), currentDatabase);
+            });
+        });
+
+        // Clear history
+        document.getElementById('clearHistory').addEventListener('click', function() {
+            sessionId = 'session_' + Math.random().toString(36).substr(2, 9);
+            document.getElementById('historySection').classList.add('hidden');
+            document.getElementById('historyList').innerHTML = '';
+            // Also clear connection info when clearing history
+            currentConnectionInfo = null;
+            originalPassword = null;
+        });
+
+        // Clear memory button
+        document.getElementById('clearMemory').addEventListener('click', clearMemory);
+
+        async function processQuery(query, database) {
+            const button = document.querySelector('#queryForm button');
+            const resultsDiv = document.getElementById('results');
+            
+            // Show loading state
+            button.disabled = true;
+            button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Generating SQL with Gemini...';
+            resultsDiv.classList.add('hidden');
+            
+            try {
+                const requestBody = { 
+                    query: query,
+                    database: database,
+                    session_id: sessionId 
+                };
+                
+                // Add custom connection info if available - FIXED: Always include password
+                if (currentConnectionInfo) {
+                    requestBody.custom_connection = {
+                        server: currentConnectionInfo.server,
+                        db_type: currentConnectionInfo.db_type,
+                        username: currentConnectionInfo.username,
+                        password: currentConnectionInfo.password, // CRITICAL: Include password
+                        port: currentConnectionInfo.port
+                    };
+                }
+                
+                const response = await fetch('/api/query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                const data = await response.json();
+                console.log('Query response:', data);
+                
+                if (data.success) {
+                    displaySuccessResults(data);
+                    addToHistory(query, data, database);
+                    // Update memory context after successful query
+                    await loadEnhancedMemoryContext();
+                } else {
+                    displayError(data.error);
+                }
+                
+            } catch (error) {
+                console.error('Query error:', error);
+                displayError('Network error: ' + error.message);
+            } finally {
+                button.disabled = false;
+                button.innerHTML = '<i class="fas fa-paper-plane mr-2"></i>Generate & Execute SQL';
+            }
+        }
+
+        function displaySuccessResults(data) {
+            const resultsDiv = document.getElementById('results');
+            
+            resultsDiv.innerHTML = `
+                <div class="bg-white rounded-2xl shadow-lg p-6 space-y-6">
+                    <!-- Success Header -->
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center text-green-600">
+                            <i class="fas fa-check-circle text-2xl mr-3"></i>
+                            <h2 class="text-2xl font-semibold">Query Successful</h2>
+                        </div>
+                        <div class="flex space-x-2">
+                            <span class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm">
+                                DB: ${data.database}
+                            </span>
+                            <span class="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm">
+                                ${data.execution_result.row_count} rows • ${data.execution_time_ms}ms
+                            </span>
+                            ${data.has_memory ? '<span class="px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm"><i class="fas fa-brain mr-1"></i>Memory</span>' : ''}
+                        </div>
+                    </div>
+                    
+                    <!-- AI Explanation -->
+                    <div class="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                        <h3 class="font-semibold text-blue-800 mb-2">
+                            <i class="fas fa-robot mr-2"></i>Gemini Analysis
+                        </h3>
+                        <p class="text-blue-700">${data.explanation || 'No explanation available'}</p>
+                    </div>
+                    
+                    <!-- SQL Query -->
+                    <div class="bg-gray-50 border border-gray-200 rounded-xl p-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="font-semibold text-gray-800">
+                                <i class="fas fa-code mr-2"></i>Generated SQL
+                            </h3>
+                            <button onclick="copyToClipboard('${data.generated_sql.replace(/'/g, "\\'")}')" 
+                                    class="px-3 py-1 bg-gray-200 text-gray-700 rounded-lg text-sm hover:bg-gray-300">
+                                <i class="fas fa-copy mr-1"></i>Copy
+                            </button>
+                        </div>
+                        <pre class="bg-gray-800 text-green-400 p-4 rounded-lg overflow-x-auto text-sm mt-2">${data.generated_sql}</pre>
+                    </div>
+                    
+                    <!-- Results Table -->
+                    <div class="bg-white border border-gray-200 rounded-xl overflow-hidden">
+                        <h3 class="font-semibold text-gray-800 p-4 border-b border-gray-200">
+                            <i class="fas fa-table mr-2"></i>Query Results
+                            <span class="text-sm font-normal text-gray-600 ml-2">(${data.execution_result.row_count} rows)</span>
+                        </h3>
+                        <div class="p-4 overflow-x-auto">
+                            ${renderResultsTable(data.execution_result.data, data.execution_result.columns)}
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            resultsDiv.classList.remove('hidden');
+            resultsDiv.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function renderResultsTable(data, columns) {
+            if (!data || data.length === 0) {
+                return '<p class="text-gray-500">No data returned</p>';
+            }
+            
+            let tableHTML = `
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+            `;
+            
+            // Table headers
+            columns.forEach(col => {
+                tableHTML += `<th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">${col}</th>`;
+            });
+            
+            tableHTML += `
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200">
+            `;
+            
+            // Table rows (limit to 50 for display)
+            data.slice(0, 50).forEach(row => {
+                tableHTML += '<tr>';
+                columns.forEach(col => {
+                    const value = row[col];
+                    tableHTML += `<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${value !== null ? value : 'NULL'}</td>`;
+                });
+                tableHTML += '</tr>';
+            });
+            
+            tableHTML += `
+                    </tbody>
+                </table>
+            `;
+            
+            if (data.length > 50) {
+                tableHTML += `<p class="mt-2 text-sm text-gray-500">Showing 50 of ${data.length} rows</p>`;
+            }
+            
+            return tableHTML;
+        }
+
+        function displayError(error) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = `
+                <div class="bg-red-50 border border-red-200 rounded-2xl p-6">
+                    <div class="flex items-center text-red-600 mb-3">
+                        <i class="fas fa-exclamation-triangle text-2xl mr-3"></i>
+                        <h2 class="text-2xl font-semibold">Error</h2>
+                    </div>
+                    <p class="text-red-700">${error}</p>
+                </div>
+            `;
+            resultsDiv.classList.remove('hidden');
+            resultsDiv.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function addToHistory(query, data, database) {
+            const historySection = document.getElementById('historySection');
+            const historyList = document.getElementById('historyList');
+            
+            historySection.classList.remove('hidden');
+            
+            const historyItem = document.createElement('div');
+            historyItem.className = 'bg-gray-50 rounded-lg p-4 border border-gray-200';
+            historyItem.innerHTML = `
+                <div class="flex justify-between items-start">
+                    <div class="flex-1">
+                        <div class="flex items-center mb-1">
+                            <span class="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs mr-2">${database}</span>
+                            <p class="font-medium text-gray-800">${query}</p>
+                        </div>
+                        <p class="text-sm text-gray-600">${data.execution_result.row_count} rows • ${data.execution_time_ms}ms</p>
+                    </div>
+                    <button onclick="this.closest('.bg-gray-50').remove()" class="text-gray-400 hover:text-gray-600 ml-2">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+            `;
+            
+            historyList.appendChild(historyItem);
+        }
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                const button = event.target;
+                const originalHTML = button.innerHTML;
+                button.innerHTML = '<i class="fas fa-check mr-1"></i>Copied!';
+                button.className = 'px-3 py-1 bg-green-200 text-green-800 rounded-lg text-sm';
+                
+                setTimeout(() => {
+                    button.innerHTML = originalHTML;
+                    button.className = 'px-3 py-1 bg-gray-200 text-gray-700 rounded-lg text-sm hover:bg-gray-300';
+                }, 2000);
+            });
+        }
+
+        // Initialize when DOM is fully loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('DOM fully loaded, initializing SQL Query Assistant...');
+            setTimeout(() => {
+                checkSystemStatus();
+            }, 100);
+        });
+    </script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def home():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/health')
+def health():
+    """Health check endpoint for Render"""
+    try:
+        db_connected = db_connector.test_connection()
+    except Exception as e:
+        logger.error(f"Database connection test failed: {e}")
+        db_connected = False
     
-    def get_conversation_history(self, session_id: str, database: str, max_messages: int = 10) -> List[Dict]:
-        """Get recent conversation history"""
-        conv_key = self._get_conversation_key(session_id, database)
-        
-        if conv_key not in self.memory_store:
-            return []
-        
-        # Update last accessed time
-        self.memory_store[conv_key]['last_accessed'] = datetime.utcnow().isoformat()
-        
-        # Return recent messages (limit to max_messages)
-        messages = self.memory_store[conv_key]['messages']
-        return messages[-max_messages:] if max_messages else messages
+    # Test Gemini connection
+    gemini_connected = False
+    try:
+        # Simple test to check if Gemini is configured
+        gemini_connected = gemini_client.is_initialized()
+    except Exception as e:
+        logger.error(f"Gemini connection test failed: {e}")
+        gemini_connected = False
     
-    def get_conversation_summary(self, session_id: str, database: str) -> str:
-        """Get a natural language summary of the conversation"""
-        history = self.get_conversation_history(session_id, database, max_messages=5)
+    return jsonify({
+        "status": "healthy",
+        "service": "Multi-Database SQL Query Assistant",
+        "database_user": config.DB_USER,
+        "database_connected": db_connected,
+        "gemini_connected": gemini_connected,
+        "default_databases": config.DEFAULT_DATABASES,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+@app.route('/api/databases')
+def get_databases():
+    """Get list of all available databases"""
+    try:
+        result = db_connector.get_databases()
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error getting databases: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "databases": config.DEFAULT_DATABASES
+        }), 500
+
+@app.route('/api/databases/<database>/tables', methods=['POST'])
+def get_tables_with_columns(database):
+    """Get tables for a specific database with column information"""
+    try:
+        data = request.get_json()
+        is_custom = data.get('is_custom', False)
+        custom_connection = data.get('custom_connection')
         
-        if not history:
-            return "No previous conversation history."
+        logger.info(f"Getting tables for {database}, custom: {is_custom}")
         
-        summary = "Previous conversation context:\n"
+        if custom_connection:
+            # Use provided custom connection
+            logger.info(f"Using provided custom connection for tables - Password provided: {bool(custom_connection.get('password'))}")
+            temp_connector = DatabaseConnector(
+                database=database,
+                db_type=custom_connection.get('db_type', 'mysql'),
+                custom_config={
+                    'server': custom_connection.get('server'),
+                    'user': custom_connection.get('username'),
+                    'password': custom_connection.get('password'),  # CRITICAL: Include password
+                    'port': custom_connection.get('port', '3306')
+                }
+            )
+            result = temp_connector.get_detailed_tables_info(database)
+        elif is_custom and database in custom_connections:
+            # Use stored custom connection
+            connection_info = custom_connections[database]
+            logger.info(f"Using stored custom connection for tables - Password provided: {bool(connection_info.get('password'))}")
+            temp_connector = DatabaseConnector(
+                database=database,
+                db_type=connection_info.get('db_type', 'mysql'),
+                custom_config={
+                    'server': connection_info.get('server'),
+                    'user': connection_info.get('username'),
+                    'password': connection_info.get('password'),  # CRITICAL: Include password
+                    'port': connection_info.get('port', '3306')
+                }
+            )
+            result = temp_connector.get_detailed_tables_info(database)
+        else:
+            # Use default connection
+            result = db_connector.get_detailed_tables_info(database)
         
-        for i, message in enumerate(history[-3:], 1):  # Last 3 messages
-            if message['role'] == 'user':
-                summary += f"User asked: {message['content']}\n"
-                if message.get('sql_query'):
-                    summary += f"SQL used: {message['sql_query']}\n"
-            elif message['role'] == 'assistant':
-                if message.get('results_summary'):
-                    results = message['results_summary']
-                    summary += f"Found {results.get('row_count', 0)} rows with columns: {', '.join(results.get('columns', []))}\n"
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error getting tables for {database}: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/register-custom-db', methods=['POST'])
+def register_custom_database():
+    """Register a custom database connection"""
+    try:
+        data = request.get_json()
+        database = data.get('database')
+        connection_info = data.get('connection_info')
         
-        return summary
+        if not database or not connection_info:
+            return jsonify({"success": False, "error": "Database and connection info are required"}), 400
+        
+        custom_connections[database] = connection_info
+        logger.info(f"Registered custom database: {database} with server: {connection_info.get('server')}")
+        
+        return jsonify({"success": True, "message": f"Custom database {database} registered"})
+    except Exception as e:
+        logger.error(f"Error registering custom database: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/connect-custom', methods=['POST'])
+def connect_custom_database():
+    """Connect to a custom database"""
+    try:
+        data = request.get_json()
+        server = data.get('server', '').strip()
+        database = data.get('database', '').strip()
+        db_type = data.get('db_type', 'mysql')
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        port = data.get('port', '').strip()
+        
+        logger.info(f"Custom connection attempt: {server} (Type: {db_type}, DB: {database}, Port: {port})")
+        
+        if not server:
+            return jsonify({"success": False, "error": "Server address is required"}), 400
+        if not username:
+            return jsonify({"success": False, "error": "Username is required"}), 400
+        if not password:
+            return jsonify({"success": False, "error": "Password is required"}), 400
+        
+        # Set default port if not provided
+        if not port:
+            port = '4000' if 'tidbcloud' in server.lower() else '3306'
+        
+        custom_config = {
+            'server': server,
+            'user': username,
+            'password': password,
+            'port': port
+        }
+        
+        # Test connection without specific database first
+        try:
+            temp_connector = DatabaseConnector(
+                database=None,  # Connect without specific database first
+                db_type=db_type,
+                custom_config=custom_config
+            )
+            
+            if temp_connector.test_connection():
+                # Get available databases
+                db_result = temp_connector.get_databases()
+                
+                if db_result['success']:
+                    # Store connection info for all available databases
+                    for db_name in db_result['databases']:
+                        custom_connections[db_name] = {
+                            'server': server,
+                            'db_type': db_type,
+                            'username': username,
+                            'password': password,
+                            'port': port
+                        }
+                    
+                    # If a specific database was provided, test connection to it
+                    specific_db_success = False
+                    if database and database in db_result['databases']:
+                        try:
+                            specific_connector = DatabaseConnector(
+                                database=database,
+                                db_type=db_type,
+                                custom_config=custom_config
+                            )
+                            specific_db_success = specific_connector.test_connection()
+                        except Exception as specific_error:
+                            logger.error(f"Specific database connection failed: {specific_error}")
+                            specific_db_success = False
+                    
+                    return jsonify({
+                        "success": True,
+                        "message": f"Successfully connected to {server}",
+                        "database": database if specific_db_success else None,
+                        "db_type": db_type,
+                        "available_databases": db_result['databases'],
+                        "server_info": f"{server}:{port}"
+                    })
+                else:
+                    return jsonify({
+                        "success": True,
+                        "message": f"Connected to server but could not list databases: {db_result.get('error', 'Unknown error')}",
+                        "database": None,
+                        "db_type": db_type,
+                        "available_databases": [],
+                        "server_info": f"{server}:{port}"
+                    })
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": f"Failed to connect to server {server}. Please check credentials and ensure the server allows connections from Render."
+                }), 400
+                
+        except Exception as conn_error:
+            logger.error(f"Connection error details: {str(conn_error)}")
+            return jsonify({
+                "success": False, 
+                "error": f"Connection failed: {str(conn_error)}"
+            }), 400
+            
+    except Exception as e:
+        logger.error(f"Custom connection error: {str(e)}")
+        return jsonify({
+            "success": False, 
+            "error": f"Connection failed: {str(e)}"
+        }), 500
+
+@app.route('/api/test-connection', methods=['POST'])
+def test_connection():
+    """Simple connection test endpoint"""
+    try:
+        data = request.get_json()
+        # Simple test that returns quickly
+        return jsonify({
+            "success": True,
+            "message": "Connection test endpoint working"
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/query', methods=['POST'])
+def handle_query():
+    start_time = datetime.utcnow()
     
-    def get_schema_learning(self, session_id: str, database: str) -> Dict[str, Any]:
-        """Extract learned schema patterns from conversation history"""
-        history = self.get_conversation_history(session_id, database)
+    try:
+        data = request.get_json()
+        query = data.get('query', '').strip()
+        database = data.get('database')
+        session_id = data.get('session_id', 'default')
+        custom_connection = data.get('custom_connection')
         
-        learned_tables = set()
-        learned_columns = {}
-        common_filters = {}
+        if not query:
+            return jsonify({"success": False, "error": "Query is required"}), 400
+        
+        if not database:
+            return jsonify({"success": False, "error": "Database selection is required"}), 400
+        
+        logger.info(f"Processing query for database {database}: {query}")
+        
+        # Store user query in memory BEFORE processing
+        memory_manager.add_message(
+            session_id=session_id,
+            database=database,
+            role='user',
+            content=query
+        )
+        
+        # Determine which connector to use
+        current_connector = None
+        
+        if custom_connection:
+            # Use provided custom connection (from frontend)
+            logger.info(f"Using provided custom connection for {database}")
+            logger.info(f"Custom connection details - Server: {custom_connection.get('server')}, User: {custom_connection.get('username')}, Password provided: {bool(custom_connection.get('password'))}")
+            
+            current_connector = DatabaseConnector(
+                database=database,
+                db_type=custom_connection.get('db_type', 'mysql'),
+                custom_config={
+                    'server': custom_connection.get('server'),
+                    'user': custom_connection.get('username'),
+                    'password': custom_connection.get('password'),
+                    'port': custom_connection.get('port', '3306')
+                }
+            )
+        elif database in custom_connections:
+            # Use stored custom connection
+            connection_info = custom_connections[database]
+            logger.info(f"Using stored custom connection for {database}")
+            logger.info(f"Stored connection details - Server: {connection_info.get('server')}, User: {connection_info.get('username')}, Password provided: {bool(connection_info.get('password'))}")
+            
+            current_connector = DatabaseConnector(
+                database=database,
+                db_type=connection_info.get('db_type', 'mysql'),
+                custom_config={
+                    'server': connection_info.get('server'),
+                    'user': connection_info.get('username'),
+                    'password': connection_info.get('password'),
+                    'port': connection_info.get('port', '3306')
+                }
+            )
+        else:
+            # Use the default connector
+            logger.info(f"Using default connector for {database}")
+            db_connector.set_database(database)
+            current_connector = db_connector
+        
+        # Test the connection first
+        logger.info("Testing database connection...")
+        if not current_connector.test_connection():
+            return jsonify({
+                "success": False,
+                "error": f"Failed to connect to database {database}. Please check connection details."
+            }), 500
+        
+        logger.info("Database connection test successful, generating SQL with Gemini...")
+        
+        # Generate SQL query using Gemini - pass the session_id for memory
+        llm_result = gemini_client.generate_sql_query(
+            query, 
+            current_connector,
+            database,
+            session_id=session_id  # Pass session_id for memory
+        )
+        
+        if not llm_result['success']:
+            return jsonify({
+                "success": False,
+                "error": llm_result['error']
+            }), 500
+        
+        generated_sql = llm_result['sql_query']
+        logger.info(f"Generated SQL: {generated_sql}")
+        
+        # Execute the query
+        logger.info("Executing SQL query...")
+        execution_result = current_connector.execute_query(generated_sql)
+        
+        if not execution_result['success']:
+            return jsonify({
+                "success": False,
+                "error": f"SQL execution failed: {execution_result['error']}",
+                "generated_sql": generated_sql
+            }), 500
+        
+        # Prepare results summary for explanation
+        results_summary = {
+            'row_count': execution_result['row_count'],
+            'columns': execution_result['columns'],
+            'sample_data': execution_result['data'][:3] if execution_result['data'] else []
+        }
+        
+        # Generate explanation
+        explanation = gemini_client.explain_query_results(
+            query, 
+            json.dumps(results_summary),
+            database
+        )
+        
+        # Store assistant response in memory AFTER execution
+        memory_manager.add_message(
+            session_id=session_id,
+            database=database,
+            role='assistant',
+            content=f"Executed query: {query}. Results: {results_summary['row_count']} rows found.",
+            sql_query=generated_sql,
+            results_summary=results_summary
+        )
+        
+        # Update conversation history (for frontend display)
+        history_key = f"{session_id}_{database}"
+        if history_key not in conversation_history:
+            conversation_history[history_key] = []
+        
+        conversation_history[history_key].append({
+            'query': query,
+            'sql': generated_sql,
+            'timestamp': datetime.utcnow().isoformat(),
+            'results_summary': results_summary
+        })
+        
+        if len(conversation_history[history_key]) > 10:
+            conversation_history[history_key] = conversation_history[history_key][-10:]
+        
+        execution_time_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+        
+        return jsonify({
+            "success": True,
+            "natural_language_query": query,
+            "generated_sql": generated_sql,
+            "explanation": explanation,
+            "execution_result": {
+                "success": True,
+                "data": execution_result['data'],
+                "row_count": execution_result['row_count'],
+                "columns": execution_result['columns']
+            },
+            "execution_time_ms": round(execution_time_ms, 2),
+            "model_used": llm_result['model_used'],
+            "database": database,
+            "session_id": session_id,
+            "has_memory": True  # Indicate that memory is being used
+        })
+        
+    except Exception as e:
+        logger.error(f"Error processing query: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": f"Server error: {str(e)}"
+        }), 500
+
+@app.route('/api/schema/<database>')
+def get_schema(database):
+    """Get database schema information"""
+    try:
+        result = db_connector.get_detailed_tables_info(database)
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"Error fetching schema for {database}: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/memory/history', methods=['POST'])
+def get_memory_history():
+    """Get conversation history from memory"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if not database:
+            return jsonify({"success": False, "error": "Database is required"}), 400
+        
+        history = memory_manager.get_conversation_history(session_id, database)
+        
+        return jsonify({
+            "success": True,
+            "history": history,
+            "total_messages": len(history)
+        })
+    except Exception as e:
+        logger.error(f"Error getting memory history: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/memory/clear', methods=['POST'])
+def clear_memory():
+    """Clear conversation memory"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if database:
+            memory_manager.clear_conversation(session_id, database)
+            message = f"Cleared memory for database: {database}"
+        else:
+            memory_manager.clear_all_conversations()
+            message = "Cleared all conversation memory"
+        
+        return jsonify({
+            "success": True,
+            "message": message
+        })
+    except Exception as e:
+        logger.error(f"Error clearing memory: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/memory/summary', methods=['POST'])
+def get_memory_summary():
+    """Get memory summary"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if not database:
+            return jsonify({"success": False, "error": "Database is required"}), 400
+        
+        summary = memory_manager.get_conversation_summary(session_id, database)
+        learned_schema = memory_manager.get_schema_learning(session_id, database)
+        
+        return jsonify({
+            "success": True,
+            "summary": summary,
+            "learned_schema": learned_schema,
+            "total_conversations": len(memory_manager.memory_store)
+        })
+    except Exception as e:
+        logger.error(f"Error getting memory summary: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+# New enhanced memory endpoints
+@app.route('/api/memory/enhanced-summary', methods=['POST'])
+def get_enhanced_memory_summary():
+    """Get enhanced memory summary with analytics"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if not database:
+            return jsonify({"success": False, "error": "Database is required"}), 400
+        
+        # Get basic summary
+        summary = memory_manager.get_conversation_summary(session_id, database)
+        learned_schema = memory_manager.get_schema_learning(session_id, database)
+        
+        # Get conversation insights
+        history = memory_manager.get_conversation_history(session_id, database)
+        
+        # Calculate additional metrics
+        total_queries = len([m for m in history if m['role'] == 'user'])
+        total_rows = sum([m.get('results_summary', {}).get('row_count', 0) for m in history if m.get('results_summary')])
+        
+        # Analyze query patterns
+        query_types = {
+            'SELECT': 0,
+            'COUNT': 0,
+            'AGGREGATE': 0,
+            'FILTER': 0
+        }
         
         for message in history:
             if message.get('sql_query'):
-                sql = message['sql_query'].lower()
-                
-                # Extract table names (simple pattern matching)
-                if 'from' in sql:
-                    # Simple table extraction - can be enhanced
-                    parts = sql.split('from')
-                    if len(parts) > 1:
-                        table_part = parts[1].split()[0].strip('`')
-                        if table_part and len(table_part) < 50:  # Basic validation
-                            learned_tables.add(table_part)
-                
-                # Extract column patterns from user queries
-                if message['role'] == 'user':
-                    content_lower = message['content'].lower()
-                    # Look for column mentions
-                    column_indicators = ['column', 'field', 'show me', 'find', 'filter by', 'where']
-                    for indicator in column_indicators:
-                        if indicator in content_lower:
-                            # Simple extraction - can be enhanced with NLP
-                            pass
+                sql = message['sql_query'].upper()
+                if 'COUNT(' in sql:
+                    query_types['COUNT'] += 1
+                if any(agg in sql for agg in ['SUM(', 'AVG(', 'MAX(', 'MIN(']):
+                    query_types['AGGREGATE'] += 1
+                if 'WHERE' in sql:
+                    query_types['FILTER'] += 1
+                query_types['SELECT'] += 1
         
-        return {
-            'tables': list(learned_tables),
-            'columns': learned_columns,
-            'common_filters': common_filters
-        }
-
-    def get_formatted_conversation_history(self, session_id: str, database: str, max_messages: int = 10) -> Dict:
-    """Get formatted conversation history for frontend display"""
-    history = self.get_conversation_history(session_id, database, max_messages)
-    
-    formatted_history = []
-    total_queries = 0
-    total_rows = 0
-    
-    for i, message in enumerate(history):
-        if message['role'] == 'user':
-            # This is a user query
-            history_item = {
-                'type': 'query',
-                'timestamp': message['timestamp'],
-                'content': message['content'],
-                'sql_query': None,
-                'results': None,
-                'message_id': i
+        return jsonify({
+            "success": True,
+            "summary": summary,
+            "learned_schema": learned_schema,
+            "analytics": {
+                "total_queries": total_queries,
+                "total_rows_processed": total_rows,
+                "query_patterns": query_types,
+                "session_duration": "Active session"  # This would need more sophisticated tracking
             }
-            
-            # Look ahead for assistant response
-            if i + 1 < len(history) and history[i + 1]['role'] == 'assistant':
-                assistant_msg = history[i + 1]
-                history_item['sql_query'] = assistant_msg.get('sql_query')
-                if assistant_msg.get('results_summary'):
-                    results = assistant_msg['results_summary']
-                    history_item['results'] = {
-                        'row_count': results.get('row_count', 0),
-                        'columns': results.get('columns', []),
-                        'execution_time': results.get('execution_time', 0)
-                    }
-                    total_queries += 1
-                    total_rows += results.get('row_count', 0)
-            
-            formatted_history.append(history_item)
-    
-    return {
-        'conversations': formatted_history,
-        'stats': {
-            'total_queries': total_queries,
-            'total_rows_processed': total_rows,
-            'session_duration': self._calculate_session_duration(history)
+        })
+    except Exception as e:
+        logger.error(f"Error getting enhanced memory summary: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/memory/formatted-history', methods=['POST'])
+def get_formatted_memory_history():
+    """Get formatted conversation history for better UI display"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if not database:
+            return jsonify({"success": False, "error": "Database is required"}), 400
+        
+        history = memory_manager.get_conversation_history(session_id, database)
+        
+        formatted_history = []
+        total_queries = 0
+        total_rows = 0
+        
+        for i, message in enumerate(history):
+            if message['role'] == 'user':
+                # This is a user query
+                history_item = {
+                    'type': 'query',
+                    'timestamp': message['timestamp'],
+                    'content': message['content'],
+                    'sql_query': None,
+                    'results': None,
+                    'message_id': i
+                }
+                
+                # Look ahead for assistant response
+                if i + 1 < len(history) and history[i + 1]['role'] == 'assistant':
+                    assistant_msg = history[i + 1]
+                    history_item['sql_query'] = assistant_msg.get('sql_query')
+                    if assistant_msg.get('results_summary'):
+                        results = assistant_msg['results_summary']
+                        history_item['results'] = {
+                            'row_count': results.get('row_count', 0),
+                            'columns': results.get('columns', []),
+                            'execution_time': results.get('execution_time', 0)
+                        }
+                        total_queries += 1
+                        total_rows += results.get('row_count', 0)
+                
+                formatted_history.append(history_item)
+        
+        # Calculate session duration
+        session_duration = "Active session"
+        if formatted_history:
+            try:
+                first_time = datetime.fromisoformat(formatted_history[0]['timestamp'].replace('Z', '+00:00'))
+                last_time = datetime.fromisoformat(formatted_history[-1]['timestamp'].replace('Z', '+00:00'))
+                duration = last_time - first_time
+                minutes = duration.total_seconds() / 60
+                
+                if minutes < 1:
+                    session_duration = "Less than 1 minute"
+                elif minutes < 60:
+                    session_duration = f"{int(minutes)} minutes"
+                else:
+                    hours = minutes / 60
+                    session_duration = f"{hours:.1f} hours"
+            except:
+                session_duration = "Active session"
+        
+        # Analyze query patterns
+        query_types = {
+            'SELECT': 0,
+            'COUNT': 0,
+            'AGGREGATE': 0,
+            'FILTER': 0
         }
-    }
-
-def _calculate_session_duration(self, history: List[Dict]) -> str:
-    """Calculate session duration from first to last message"""
-    if not history:
-        return "0 minutes"
-    
-    try:
-        first_time = datetime.fromisoformat(history[0]['timestamp'])
-        last_time = datetime.fromisoformat(history[-1]['timestamp'])
-        duration = last_time - first_time
-        minutes = duration.total_seconds() / 60
         
-        if minutes < 1:
-            return "Less than 1 minute"
-        elif minutes < 60:
-            return f"{int(minutes)} minutes"
-        else:
-            hours = minutes / 60
-            return f"{hours:.1f} hours"
-    except:
-        return "Unknown duration"
-
-def get_conversation_insights(self, session_id: str, database: str) -> Dict:
-    """Get insights about the conversation patterns"""
-    history = self.get_conversation_history(session_id, database)
-    
-    # Analyze query patterns
-    table_usage = {}
-    common_filters = {}
-    query_types = {
-        'SELECT': 0,
-        'COUNT': 0,
-        'AGGREGATE': 0,
-        'FILTER': 0
-    }
-    
-    for message in history:
-        if message.get('sql_query'):
-            sql = message['sql_query'].upper()
-            
-            # Count query types
-            if 'COUNT(' in sql:
-                query_types['COUNT'] += 1
-            if any(agg in sql for agg in ['SUM(', 'AVG(', 'MAX(', 'MIN(']):
-                query_types['AGGREGATE'] += 1
-            if 'WHERE' in sql:
-                query_types['FILTER'] += 1
-            query_types['SELECT'] += 1
-            
-            # Extract table usage
-            if 'FROM' in sql:
-                table_part = sql.split('FROM')[1].split()[0].strip('`')
-                table_usage[table_part] = table_usage.get(table_part, 0) + 1
-    
-    return {
-        'query_patterns': query_types,
-        'table_usage': table_usage,
-        'total_interactions': len([m for m in history if m['role'] == 'user']),
-        'most_active_period': self._get_most_active_period(history)
-    }
-
-def _get_most_active_period(self, history: List[Dict]) -> str:
-    """Determine the most active period in the conversation"""
-    if not history:
-        return "No activity"
-    
-    try:
-        hours = []
         for message in history:
-            dt = datetime.fromisoformat(message['timestamp'])
-            hours.append(dt.hour)
+            if message.get('sql_query'):
+                sql = message['sql_query'].upper()
+                if 'COUNT(' in sql:
+                    query_types['COUNT'] += 1
+                if any(agg in sql for agg in ['SUM(', 'AVG(', 'MAX(', 'MIN(']):
+                    query_types['AGGREGATE'] += 1
+                if 'WHERE' in sql:
+                    query_types['FILTER'] += 1
+                query_types['SELECT'] += 1
         
-        if hours:
-            avg_hour = sum(hours) / len(hours)
-            if 5 <= avg_hour < 12:
-                return "Morning"
-            elif 12 <= avg_hour < 17:
-                return "Afternoon"
-            elif 17 <= avg_hour < 22:
-                return "Evening"
-            else:
-                return "Night"
-    except:
-        pass
-    
-    return "Various times"
-    
-    def _cleanup_old_conversations(self):
-        """Remove old conversations to manage memory"""
-        if len(self.memory_store) <= self.max_conversations:
-            return
+        # Determine most active period (simplified)
+        most_active_period = "Various times"
+        if formatted_history:
+            try:
+                hours = []
+                for conv in formatted_history:
+                    dt = datetime.fromisoformat(conv['timestamp'].replace('Z', '+00:00'))
+                    hours.append(dt.hour)
+                
+                if hours:
+                    avg_hour = sum(hours) / len(hours)
+                    if 5 <= avg_hour < 12:
+                        most_active_period = "Morning"
+                    elif 12 <= avg_hour < 17:
+                        most_active_period = "Afternoon"
+                    elif 17 <= avg_hour < 22:
+                        most_active_period = "Evening"
+                    else:
+                        most_active_period = "Night"
+            except:
+                most_active_period = "Various times"
         
-        # Sort by last accessed time and remove oldest
-        conversations = sorted(
-            self.memory_store.items(),
-            key=lambda x: x[1]['last_accessed']
-        )
-        
-        # Remove oldest conversations until we're under the limit
-        while len(self.memory_store) > self.max_conversations:
-            oldest_key = conversations.pop(0)[0]
-            del self.memory_store[oldest_key]
-            logger.info(f"Cleaned up old conversation: {oldest_key}")
-    
-    def clear_conversation(self, session_id: str, database: str):
-        """Clear specific conversation history"""
-        conv_key = self._get_conversation_key(session_id, database)
-        if conv_key in self.memory_store:
-            del self.memory_store[conv_key]
-            logger.info(f"Cleared conversation: {conv_key}")
-    
-    def clear_all_conversations(self):
-        """Clear all conversation history"""
-        self.memory_store.clear()
-        logger.info("Cleared all conversation history")
+        return jsonify({
+            "success": True,
+            "history": formatted_history,
+            "stats": {
+                "total_queries": total_queries,
+                "total_rows_processed": total_rows,
+                "session_duration": session_duration
+            },
+            "insights": {
+                "query_patterns": query_types,
+                "most_active_period": most_active_period,
+                "total_interactions": len([m for m in history if m['role'] == 'user'])
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error getting formatted memory history: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
-# Global memory manager instance
-memory_manager = MemoryManager()
+@app.route('/api/memory/export', methods=['POST'])
+def export_memory():
+    """Export conversation memory as JSON"""
+    try:
+        data = request.get_json()
+        session_id = data.get('session_id', 'default')
+        database = data.get('database')
+        
+        if not database:
+            return jsonify({"success": False, "error": "Database is required"}), 400
+        
+        history = memory_manager.get_conversation_history(session_id, database)
+        
+        export_data = {
+            "export_info": {
+                "exported_at": datetime.utcnow().isoformat(),
+                "session_id": session_id,
+                "database": database,
+                "total_messages": len(history)
+            },
+            "conversation_history": history,
+            "schema_learning": memory_manager.get_schema_learning(session_id, database)
+        }
+        
+        return jsonify({
+            "success": True,
+            "export_data": export_data,
+            "filename": f"sql_assistant_memory_{database}_{session_id[:8]}.json"
+        })
+    except Exception as e:
+        logger.error(f"Error exporting memory: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route('/api/clear-cache', methods=['POST'])
+def clear_cache():
+    """Clear Gemini schema cache"""
+    try:
+        gemini_client.clear_schema_cache()
+        return jsonify({"success": True, "message": "Cache cleared"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🚀 Starting Multi-Database SQL Assistant on port {port}")
+    logger.info(f"📊 Default databases: {config.DEFAULT_DATABASES}")
+    logger.info(f"🔗 Database server: {config.DB_SERVER}:{config.DB_PORT}")
+    logger.info(f"🧠 Memory system: Enabled with {memory_manager.max_conversations} max conversations")
+    app.run(host='0.0.0.0', port=port, debug=False)
