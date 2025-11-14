@@ -509,7 +509,6 @@ HTML_TEMPLATE = '''
             }
         }
         
-        // Simplified memory context loading
         // Enhanced memory context loading with proper bullet points
         async function loadMemoryContext() {
             if (!currentDatabase) return;
@@ -562,10 +561,12 @@ HTML_TEMPLATE = '''
                                     </div>
                                 </div>`;
                             } else if (line.includes('Found') && line.includes('rows with columns:')) {
-                                const match = line.match(/Found (\d+) rows with columns: (.+)/);
-                                if (match) {
-                                    const rowCount = match[1];
-                                    const columns = match[2];
+                                // Fixed regex - use string methods instead of regex to avoid escape issues
+                                const foundIndex = line.indexOf('Found');
+                                const rowsIndex = line.indexOf('rows with columns:');
+                                if (foundIndex !== -1 && rowsIndex !== -1) {
+                                    const rowCount = line.substring(foundIndex + 5, rowsIndex).trim();
+                                    const columns = line.substring(rowsIndex + 18).trim();
                                     return `<div class="flex items-start mb-2">
                                         <span class="text-purple-500 mr-2 mt-1">•</span>
                                         <div>
@@ -1037,8 +1038,6 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
-# ... (keep all your existing API endpoints exactly as they were before, without the enhanced memory endpoints)
-
 @app.route('/')
 def home():
     return render_template_string(HTML_TEMPLATE)
@@ -1063,7 +1062,7 @@ def health():
     
     return jsonify({
         "status": "healthy",
-        "service": "Multi-Database SQL Query Assistant",
+        "service": "Multi-Database SQL Assistant",
         "database_user": config.DB_USER,
         "database_connected": db_connected,
         "gemini_connected": gemini_connected,
