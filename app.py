@@ -227,6 +227,7 @@ HTML_TEMPLATE = '''
         let originalPassword = null;
 
         // Check system status on load
+        // Check system status on load
         async function checkSystemStatus() {
             try {
                 console.log('Checking system status...');
@@ -275,6 +276,10 @@ HTML_TEMPLATE = '''
                 
                 aiStatus.innerHTML = '<i class="fas fa-robot mr-1"></i>AI: Error';
                 aiStatus.className = 'px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm';
+                
+                // Show error in database list
+                const databaseList = document.getElementById('databaseList');
+                databaseList.innerHTML = '<p class="text-red-500 col-span-4 text-center py-4">Error loading system status. Check console for details.</p>';
             }
         }
         
