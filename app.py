@@ -510,6 +510,7 @@ HTML_TEMPLATE = '''
         }
         
         // Simplified memory context loading
+        // Enhanced memory context loading with proper bullet points
         async function loadMemoryContext() {
             if (!currentDatabase) return;
             
@@ -533,17 +534,68 @@ HTML_TEMPLATE = '''
                 if (data.success) {
                     memorySection.classList.remove('hidden');
                     
+                    // Parse and format the summary with proper bullet points
+                    let formattedSummary = '';
+                    
+                    if (data.summary && data.summary !== "No previous conversation history.") {
+                        const lines = data.summary.split('\n').filter(line => line.trim());
+                        
+                        formattedSummary = lines.map(line => {
+                            if (line.includes('Previous conversation context:')) {
+                                return `<div class="font-medium text-purple-800 mb-2">${line}</div>`;
+                            } else if (line.includes('User asked:')) {
+                                const question = line.replace('User asked:', '').trim();
+                                return `<div class="flex items-start mb-2">
+                                    <span class="text-purple-500 mr-2 mt-1">•</span>
+                                    <div>
+                                        <strong class="text-purple-800">User asked:</strong>
+                                        <span class="text-purple-700 ml-1">"${question}"</span>
+                                    </div>
+                                </div>`;
+                            } else if (line.includes('SQL used:')) {
+                                const sql = line.replace('SQL used:', '').trim();
+                                return `<div class="flex items-start mb-2">
+                                    <span class="text-purple-500 mr-2 mt-1">•</span>
+                                    <div>
+                                        <strong class="text-purple-800">SQL used:</strong>
+                                        <code class="text-purple-600 ml-1 bg-purple-50 px-1 rounded text-xs">${sql}</code>
+                                    </div>
+                                </div>`;
+                            } else if (line.includes('Found') && line.includes('rows with columns:')) {
+                                const match = line.match(/Found (\d+) rows with columns: (.+)/);
+                                if (match) {
+                                    const rowCount = match[1];
+                                    const columns = match[2];
+                                    return `<div class="flex items-start mb-2">
+                                        <span class="text-purple-500 mr-2 mt-1">•</span>
+                                        <div>
+                                            <strong class="text-purple-800">Found ${rowCount} rows</strong>
+                                            <span class="text-purple-700 ml-1">with columns: ${columns}</span>
+                                        </div>
+                                    </div>`;
+                                }
+                            }
+                            return `<div class="text-purple-700 mb-2">${line}</div>`;
+                        }).join('');
+                    } else {
+                        formattedSummary = '<div class="text-purple-600 italic">No conversation history yet. Start asking questions to build context.</div>';
+                    }
+                    
                     let memoryHTML = `
                         <div class="space-y-4">
-                            <!-- Simple Memory Stats -->
+                            <!-- Conversation Context -->
                             <div class="bg-white rounded-lg p-4 border border-purple-200">
-                                <div class="flex items-center justify-between mb-2">
-                                    <span class="font-semibold text-purple-800">Conversation Context</span>
+                                <div class="flex items-center justify-between mb-3">
+                                    <span class="font-semibold text-purple-800 flex items-center">
+                                        <i class="fas fa-comments mr-2"></i>Conversation Context
+                                    </span>
                                     <span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">
                                         ${data.total_conversations} conversation${data.total_conversations !== 1 ? 's' : ''}
                                     </span>
                                 </div>
-                                <p class="text-purple-700 text-sm">${data.summary}</p>
+                                <div class="text-purple-700 text-sm">
+                                    ${formattedSummary}
+                                </div>
                             </div>
                     `;
                     
@@ -551,12 +603,15 @@ HTML_TEMPLATE = '''
                     if (data.learned_schema && data.learned_schema.tables && data.learned_schema.tables.length > 0) {
                         memoryHTML += `
                             <div class="bg-white rounded-lg p-4 border border-purple-200">
-                                <h4 class="font-semibold text-purple-800 mb-2 flex items-center">
-                                    <i class="fas fa-brain mr-2"></i>Learned Schema
+                                <h4 class="font-semibold text-purple-800 mb-3 flex items-center">
+                                    <i class="fas fa-database mr-2"></i>Learned Schema
                                 </h4>
-                                <div class="flex flex-wrap gap-1">
+                                <div class="flex flex-wrap gap-2">
                                     ${data.learned_schema.tables.map(table => 
-                                        `<span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">${table}</span>`
+                                        `<span class="px-3 py-2 bg-purple-100 text-purple-800 rounded-lg text-sm flex items-center border border-purple-200">
+                                            <i class="fas fa-table mr-2 text-xs"></i>
+                                            <span class="font-medium">${table}</span>
+                                        </span>`
                                     ).join('')}
                                 </div>
                             </div>
@@ -568,7 +623,7 @@ HTML_TEMPLATE = '''
                     
                     // Update memory status
                     memoryStatus.classList.remove('hidden');
-                    memoryStatus.innerHTML = '<i class="fas fa-brain mr-1"></i>Memory: Active';
+                    memoryStatus.innerHTML = `<i class="fas fa-brain mr-1"></i>Memory: ${data.total_conversations} conv`;
                     memoryStatus.className = 'px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm';
                 }
             } catch (error) {
