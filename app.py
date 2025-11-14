@@ -227,7 +227,6 @@ HTML_TEMPLATE = '''
         let originalPassword = null;
 
         // Check system status on load
-        // Check system status on load
         async function checkSystemStatus() {
             try {
                 console.log('Checking system status...');
@@ -276,10 +275,6 @@ HTML_TEMPLATE = '''
                 
                 aiStatus.innerHTML = '<i class="fas fa-robot mr-1"></i>AI: Error';
                 aiStatus.className = 'px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm';
-                
-                // Show error in database list
-                const databaseList = document.getElementById('databaseList');
-                databaseList.innerHTML = '<p class="text-red-500 col-span-4 text-center py-4">Error loading system status. Check console for details.</p>';
             }
         }
         
@@ -514,7 +509,7 @@ HTML_TEMPLATE = '''
             }
         }
         
-        // Enhanced memory context loading with proper bullet points
+        // Simplified memory context loading
         async function loadMemoryContext() {
             if (!currentDatabase) return;
             
@@ -538,70 +533,17 @@ HTML_TEMPLATE = '''
                 if (data.success) {
                     memorySection.classList.remove('hidden');
                     
-                    // Parse and format the summary with proper bullet points
-                    let formattedSummary = '';
-                    
-                    if (data.summary && data.summary !== "No previous conversation history.") {
-                        const lines = data.summary.split('\n').filter(line => line.trim());
-                        
-                        formattedSummary = lines.map(line => {
-                            if (line.includes('Previous conversation context:')) {
-                                return `<div class="font-medium text-purple-800 mb-2">${line}</div>`;
-                            } else if (line.includes('User asked:')) {
-                                const question = line.replace('User asked:', '').trim();
-                                return `<div class="flex items-start mb-2">
-                                    <span class="text-purple-500 mr-2 mt-1">•</span>
-                                    <div>
-                                        <strong class="text-purple-800">User asked:</strong>
-                                        <span class="text-purple-700 ml-1">"${question}"</span>
-                                    </div>
-                                </div>`;
-                            } else if (line.includes('SQL used:')) {
-                                const sql = line.replace('SQL used:', '').trim();
-                                return `<div class="flex items-start mb-2">
-                                    <span class="text-purple-500 mr-2 mt-1">•</span>
-                                    <div>
-                                        <strong class="text-purple-800">SQL used:</strong>
-                                        <code class="text-purple-600 ml-1 bg-purple-50 px-1 rounded text-xs">${sql}</code>
-                                    </div>
-                                </div>`;
-                            } else if (line.includes('Found') && line.includes('rows with columns:')) {
-                                // Fixed regex - use string methods instead of regex to avoid escape issues
-                                const foundIndex = line.indexOf('Found');
-                                const rowsIndex = line.indexOf('rows with columns:');
-                                if (foundIndex !== -1 && rowsIndex !== -1) {
-                                    const rowCount = line.substring(foundIndex + 5, rowsIndex).trim();
-                                    const columns = line.substring(rowsIndex + 18).trim();
-                                    return `<div class="flex items-start mb-2">
-                                        <span class="text-purple-500 mr-2 mt-1">•</span>
-                                        <div>
-                                            <strong class="text-purple-800">Found ${rowCount} rows</strong>
-                                            <span class="text-purple-700 ml-1">with columns: ${columns}</span>
-                                        </div>
-                                    </div>`;
-                                }
-                            }
-                            return `<div class="text-purple-700 mb-2">${line}</div>`;
-                        }).join('');
-                    } else {
-                        formattedSummary = '<div class="text-purple-600 italic">No conversation history yet. Start asking questions to build context.</div>';
-                    }
-                    
                     let memoryHTML = `
                         <div class="space-y-4">
-                            <!-- Conversation Context -->
+                            <!-- Simple Memory Stats -->
                             <div class="bg-white rounded-lg p-4 border border-purple-200">
-                                <div class="flex items-center justify-between mb-3">
-                                    <span class="font-semibold text-purple-800 flex items-center">
-                                        <i class="fas fa-comments mr-2"></i>Conversation Context
-                                    </span>
+                                <div class="flex items-center justify-between mb-2">
+                                    <span class="font-semibold text-purple-800">Conversation Context</span>
                                     <span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">
                                         ${data.total_conversations} conversation${data.total_conversations !== 1 ? 's' : ''}
                                     </span>
                                 </div>
-                                <div class="text-purple-700 text-sm">
-                                    ${formattedSummary}
-                                </div>
+                                <p class="text-purple-700 text-sm">${data.summary}</p>
                             </div>
                     `;
                     
@@ -609,15 +551,12 @@ HTML_TEMPLATE = '''
                     if (data.learned_schema && data.learned_schema.tables && data.learned_schema.tables.length > 0) {
                         memoryHTML += `
                             <div class="bg-white rounded-lg p-4 border border-purple-200">
-                                <h4 class="font-semibold text-purple-800 mb-3 flex items-center">
-                                    <i class="fas fa-database mr-2"></i>Learned Schema
+                                <h4 class="font-semibold text-purple-800 mb-2 flex items-center">
+                                    <i class="fas fa-brain mr-2"></i>Learned Schema
                                 </h4>
-                                <div class="flex flex-wrap gap-2">
+                                <div class="flex flex-wrap gap-1">
                                     ${data.learned_schema.tables.map(table => 
-                                        `<span class="px-3 py-2 bg-purple-100 text-purple-800 rounded-lg text-sm flex items-center border border-purple-200">
-                                            <i class="fas fa-table mr-2 text-xs"></i>
-                                            <span class="font-medium">${table}</span>
-                                        </span>`
+                                        `<span class="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs">${table}</span>`
                                     ).join('')}
                                 </div>
                             </div>
@@ -629,7 +568,7 @@ HTML_TEMPLATE = '''
                     
                     // Update memory status
                     memoryStatus.classList.remove('hidden');
-                    memoryStatus.innerHTML = `<i class="fas fa-brain mr-1"></i>Memory: ${data.total_conversations} conv`;
+                    memoryStatus.innerHTML = '<i class="fas fa-brain mr-1"></i>Memory: Active';
                     memoryStatus.className = 'px-3 py-1 bg-purple-100 text-purple-800 rounded-full text-sm';
                 }
             } catch (error) {
@@ -1043,6 +982,8 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
+# ... (keep all your existing API endpoints exactly as they were before, without the enhanced memory endpoints)
+
 @app.route('/')
 def home():
     return render_template_string(HTML_TEMPLATE)
@@ -1067,7 +1008,7 @@ def health():
     
     return jsonify({
         "status": "healthy",
-        "service": "Multi-Database SQL Assistant",
+        "service": "Multi-Database SQL Query Assistant",
         "database_user": config.DB_USER,
         "database_connected": db_connected,
         "gemini_connected": gemini_connected,
