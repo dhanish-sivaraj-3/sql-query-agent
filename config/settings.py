@@ -6,11 +6,11 @@ logger = logging.getLogger(__name__)
 
 class Config:
     # Aiven MySQL Database Configuration - ALL FROM ENVIRONMENT VARIABLES
-    DB_SERVER = os.getenv('DB_SERVER', 'mysql-dhanish2468-a3a0.j.aivencloud.com')
-    DB_PORT = os.getenv('DB_PORT', '20138')
-    DB_USER = os.getenv('DB_USER', 'avnadmin')
+    DB_SERVER = os.getenv('DB_SERVER', 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com')
+    DB_PORT = os.getenv('DB_PORT', '4000')
+    DB_USER = os.getenv('DB_USER', '2CWA2ghnSVBbBK4.root')
     DB_PASSWORD = os.getenv('DB_PASSWORD', '')  # MUST be set in environment
-    DEFAULT_DATABASES = ["defaultdb", "healthcare", "ecommerce"]
+    DEFAULT_DATABASES = [ "healthcare", "ecommerce"]
     
     MYSQL_SYSTEM_DATABASES = ["information_schema", "mysql", "performance_schema", "sys"]
     SQLSERVER_SYSTEM_DATABASES = ["master", "tempdb", "model", "msdb"]
